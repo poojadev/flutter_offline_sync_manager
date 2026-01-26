@@ -10,13 +10,12 @@ environment:
   flutter: ">=3.0.0"
 
 topics:
-  - offline
-  - sync
-  - offline-first
-  - background-sync
-  - flutter-infra
-  - data-sync
-  - conflict-resolution
+    - offline
+    - sync
+    - offline-first
+    - background-sync
+    - conflict-resolution
+
 
 dependencies:
   flutter:
