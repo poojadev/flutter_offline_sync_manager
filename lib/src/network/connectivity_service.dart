@@ -27,7 +27,7 @@ abstract class ConnectivityService {
 /// Handles mobile and WiFi connections.
 class DefaultConnectivityService implements ConnectivityService {
   final Connectivity _connectivity = Connectivity();
-  StreamSubscription<ConnectivityResult>? _subscription;
+  StreamSubscription<List<ConnectivityResult>>? _subscription;
   final _controller = StreamController<bool>.broadcast();
   bool _lastStatus = false;
   bool _isDisposed = false;
@@ -45,7 +45,7 @@ class DefaultConnectivityService implements ConnectivityService {
 
     // Listen to connectivity changes
     _subscription = _connectivity.onConnectivityChanged.listen(
-      (ConnectivityResult result) async {
+      (List<ConnectivityResult> results) async {
         if (_isDisposed) return;
 
         final isOnline = await _checkConnectivity();
@@ -71,12 +71,13 @@ class DefaultConnectivityService implements ConnectivityService {
   /// and the connection is not none.
   Future<bool> _checkConnectivity() async {
     try {
-      final result = await _connectivity.checkConnectivity();
-      // Consider online if connection is available and not none
-      return result != ConnectivityResult.none &&
+      final results = await _connectivity.checkConnectivity();
+      // Consider online if any connection type is available and not none
+      return results.any((result) =>
+          result != ConnectivityResult.none &&
           (result == ConnectivityResult.wifi ||
               result == ConnectivityResult.mobile ||
-              result == ConnectivityResult.ethernet);
+              result == ConnectivityResult.ethernet));
     } catch (e) {
       // On error, assume offline
       return false;
