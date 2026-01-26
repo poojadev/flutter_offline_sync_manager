@@ -56,36 +56,12 @@ export 'src/debug/sync_metrics.dart';
 export 'src/debug/sync_debug_snapshot.dart';
 export 'src/debug/sync_debug_controller.dart';
 
-// Adapter errors (shared, backend-agnostic)
+// Official backend adapters (Step 7)
 export 'src/adapters/adapter_errors.dart';
-
-// NOTE: Backend adapters have been moved to separate packages for better modularity
-// and to keep the core package backend-agnostic.
-//
-// Use these packages instead:
-// - flutter_offline_sync_manager_firestore (for Firestore)
-// - flutter_offline_sync_manager_rest (for REST APIs)
-// - flutter_offline_sync_manager_graphql (for GraphQL)
-//
-// Example:
-//   dependencies:
-//     flutter_offline_sync_manager: ^0.3.0
-//     flutter_offline_sync_manager_firestore: ^0.3.0
-//
-//   import 'package:flutter_offline_sync_manager_firestore/flutter_offline_sync_manager_firestore.dart';
-//
-// For backward compatibility, adapter exports are still available but deprecated.
-// They will be removed in a future major version.
-@Deprecated('Use flutter_offline_sync_manager_rest instead')
-export 'src/adapters/rest/rest_sync_adapter.dart' show RestSyncAdapter;
-@Deprecated('Use flutter_offline_sync_manager_rest instead')
-export 'src/adapters/rest/rest_sync_config.dart' show RestSyncConfig;
-@Deprecated('Use flutter_offline_sync_manager_firestore instead')
-export 'src/adapters/firebase/firestore_sync_adapter.dart' show FirestoreSyncAdapter;
-@Deprecated('Use flutter_offline_sync_manager_firestore instead')
-export 'src/adapters/firebase/firestore_sync_config.dart' show FirestoreSyncConfig;
-@Deprecated('Use flutter_offline_sync_manager_graphql instead')
-export 'src/adapters/graphql/graphql_sync_adapter.dart' show GraphQLSyncAdapter;
-@Deprecated('Use flutter_offline_sync_manager_graphql instead')
-export 'src/adapters/graphql/graphql_sync_config.dart' show GraphQLSyncConfig;
+export 'src/adapters/rest/rest_sync_adapter.dart';
+export 'src/adapters/rest/rest_sync_config.dart';
+export 'src/adapters/firebase/firestore_sync_adapter.dart';
+export 'src/adapters/firebase/firestore_sync_config.dart';
+export 'src/adapters/graphql/graphql_sync_adapter.dart';
+export 'src/adapters/graphql/graphql_sync_config.dart';
 

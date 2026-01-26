@@ -1,6 +1,6 @@
 # flutter_offline_sync_manager
 
-**Offline-first, conflict-safe, backend-agnostic sync engine for Flutter**
+**Offline-first, conflict-safe sync engine for Flutter**
 
 [![pub package](https://img.shields.io/pub/v/flutter_offline_sync_manager.svg)](https://pub.dev/packages/flutter_offline_sync_manager)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -55,12 +55,10 @@ This package solves all of these problems with a **deterministic, crash-safe que
 - **Event stream** (monitor sync lifecycle)
 
 ### Backend Support
-- **REST adapter** (ready-to-use, requires `http` package)
-- **Firebase Firestore adapter** (ready-to-use, requires `cloud_firestore` package)
-- **GraphQL adapter** (ready-to-use, requires `http` package)
+- **REST adapter** (ready-to-use)
+- **Firebase Firestore adapter** (ready-to-use)
+- **GraphQL adapter** (ready-to-use)
 - **Custom adapters** (easy to implement)
-
-**Note:** This package does not force specific backend SDK versions. You control which versions of `cloud_firestore`, `http`, etc. to use in your app, preventing dependency conflicts.
 
 ---
 
@@ -68,30 +66,30 @@ This package solves all of these problems with a **deterministic, crash-safe que
 
 ### 1. Add Dependency
 
-**Core package (required):**
 ```yaml
 dependencies:
-  flutter_offline_sync_manager: ^0.2.0
+  flutter_offline_sync_manager: ^0.1.2
   hive: ^2.2.3
-  hive_flutter: ^2.0.0
+  hive_flutter: ^1.1.0
 ```
 
-**Optional adapter dependencies:**
+**Backend SDK Dependencies:**
 
-The package is backend-agnostic and does not force specific backend SDK versions. Add only the dependencies you need:
+This package includes adapters for Firestore, REST, and GraphQL. If you use any of these adapters, you must also add the corresponding backend SDK to your app's `pubspec.yaml`:
 
-- **For REST adapter:** `http: ^1.1.0` (or any compatible version)
-- **For Firestore adapter:** `cloud_firestore: ^5.0.0` (or any compatible version)
-- **For GraphQL adapter:** `http: ^1.1.0` (or any compatible version)
+- **For Firestore adapter:** Add `cloud_firestore` (compatible with `>=4.0.0 <6.0.0`)
+- **For REST/GraphQL adapters:** Add `http` (compatible with `>=0.13.0 <2.0.0`)
 
 Example for Firestore usage:
 ```yaml
 dependencies:
-  flutter_offline_sync_manager: ^0.2.0
+  flutter_offline_sync_manager: ^0.1.2
   hive: ^2.2.3
-  hive_flutter: ^2.0.0
-  cloud_firestore: ^5.0.0  # Your app controls the version
+  hive_flutter: ^1.1.0
+  cloud_firestore: ^5.0.0  # Your app's version
 ```
+
+The package uses wide version constraints to ensure compatibility with your app's backend SDK versions.
 
 ### 2. Initialize Hive
 
@@ -106,10 +104,9 @@ void main() async {
 
 ### 3. Create Sync Adapter
 
-**REST Adapter (requires `http` package):**
+**REST Adapter:**
 ```dart
 import 'package:flutter_offline_sync_manager/flutter_offline_sync_manager.dart';
-// Make sure http is in your pubspec.yaml
 
 final adapter = RestSyncAdapter(
   config: RestSyncConfig(
@@ -119,11 +116,10 @@ final adapter = RestSyncAdapter(
 );
 ```
 
-**Firestore Adapter (requires `cloud_firestore` package):**
+**Firestore Adapter:**
 ```dart
 import 'package:flutter_offline_sync_manager/flutter_offline_sync_manager.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-// Make sure cloud_firestore is in your pubspec.yaml
 
 final adapter = FirestoreSyncAdapter(
   firestore: FirebaseFirestore.instance,
@@ -133,16 +129,6 @@ final adapter = FirestoreSyncAdapter(
   ),
 );
 ```
-
-**Important:** The package does not include backend SDK dependencies. You must add them to your app's `pubspec.yaml`:
-
-- **Firestore adapter:** Add `cloud_firestore: ^5.0.0` (or your preferred version)
-- **REST adapter:** Add `http: ^1.1.0` (or your preferred version)
-- **GraphQL adapter:** Add `http: ^1.1.0` (or your preferred version)
-
-This allows you to control backend SDK versions and avoid dependency conflicts.
-
-**Note:** If you see compilation errors in the adapter files when developing the package itself, this is expected. The adapters will compile correctly when your consuming app includes the required backend dependencies.
 
 ### 4. Create Sync Manager
 
@@ -303,9 +289,9 @@ This package provides **explicit guarantees**:
 - ✅ **Crash-safe** — Tasks marked as syncing before network calls
 - ✅ **Idempotent** — Same task can be retried safely
 
-### Backend Agnostic
-- ✅ **Works with any backend** — REST, Firebase, GraphQL, or custom
-- ✅ **No backend assumptions** — Adapters are swappable
+### Backend Support
+- ✅ **Works with multiple backends** — REST, Firebase, GraphQL, or custom
+- ✅ **Swappable adapters** — Easy to switch or create custom adapters
 - ✅ **No schema requirements** — Works with any data structure
 
 ### OS Compliance
@@ -325,7 +311,7 @@ To set proper expectations:
 - ❌ **Does NOT guarantee background sync frequency** — OS-controlled
 - ❌ **Does NOT provide real-time sync** — Queue-based, not event-based
 - ❌ **Does NOT handle schema migrations** — You manage schema changes
-- ❌ **Does NOT force backend SDK versions** — You control `cloud_firestore`, `http`, etc. versions
+- ❌ **Does NOT handle schema migrations** — You manage schema changes
 
 ---
 
