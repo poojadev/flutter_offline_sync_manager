@@ -225,8 +225,16 @@ class RestSyncAdapter implements SyncAdapter {
     for (final task in tasks) {
       errors[task.taskId] = message;
     }
-    return SyncResult.allFailed(errors);
+    return SyncResult.allFailed(errors, permanent: _isPermanent(statusCode));
   }
+
+  /// Client errors that will fail the same way on every retry go straight
+  /// to the dead-letter queue. Auth (401/403), timeout (408), too-early (425)
+  /// and rate-limit (429) responses can succeed later, so they are retried.
+  static bool _isPermanent(int statusCode) =>
+      statusCode >= 400 &&
+      statusCode < 500 &&
+      !const {401, 403, 408, 425, 429}.contains(statusCode);
 
   /// Creates a network error result.
   SyncResult _createNetworkErrorResult(

@@ -10,6 +10,12 @@ export 'src/core/sync_operation.dart';
 export 'src/core/sync_status.dart';
 export 'src/core/sync_result.dart';
 export 'src/core/sync_config.dart';
+export 'src/core/sync_priority.dart';
+export 'src/core/entity_ref.dart';
+export 'src/core/sync_state.dart';
+export 'src/core/sync_report.dart';
+export 'src/core/queue_compactor.dart';
+export 'src/core/queue_scheduler.dart';
 
 // Manager
 export 'src/manager/offline_sync_manager.dart';
@@ -17,6 +23,7 @@ export 'src/manager/offline_sync_manager.dart';
 // Store abstraction
 export 'src/store/sync_store.dart';
 export 'src/store/hive_sync_store.dart';
+export 'src/store/in_memory_sync_store.dart';
 
 // Adapter abstraction
 export 'src/adapter/sync_adapter.dart';
@@ -26,6 +33,9 @@ export 'src/network/connectivity_service.dart';
 
 // Retry policy (Step 2)
 export 'src/retry/retry_policy.dart';
+
+// Resilience
+export 'src/resilience/circuit_breaker.dart';
 
 // App lifecycle (Step 2)
 export 'src/lifecycle/app_lifecycle_observer.dart';

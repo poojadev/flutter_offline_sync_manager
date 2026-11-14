@@ -121,13 +121,13 @@ void callbackDispatcher() {
         // For now, this is a placeholder that returns success
         // The actual sync execution should be implemented by the app
         // using BackgroundSyncService.executeBackgroundSync()
-        return Future.value(true);
+        return true;
       } catch (e) {
         // Fail silently - background sync is best-effort
-        return Future.value(false);
+        return false;
       }
     }
-    return Future.value(false);
+    return false;
   });
 }
 

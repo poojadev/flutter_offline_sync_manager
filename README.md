@@ -32,13 +32,23 @@ This package solves all of these problems with a **deterministic, crash-safe que
 ## Features
 
 ### Core Engine
-- **Persistent sync queue** using Hive (survives app restarts)
+- **Persistent sync queue** using Hive (survives app restarts), optionally **encrypted at rest**
 - **Deterministic task IDs** prevent duplicate syncs
+- **Queue compaction**: create + update + update becomes a single request, and create + delete never touches the network *(new in 0.2)*
+- **Edit-while-syncing safety**: an edit made during an in-flight request is never marked as synced by the older acknowledgment *(new in 0.2)*
 - **Single-flight sync** prevents parallel execution
-- **Batch sync** with partial success handling
+- **Batch sync** with partial success handling; one `sync()` drains the whole queue
+
+### Ordering & Scheduling *(new in 0.2)*
+- **Priorities** (`low`, `normal`, `high`, `critical`)
+- **Per-entity FIFO**: an update never overtakes the create it depends on
+- **Cross-entity dependencies**: hold a `comment` until its `post` is synced
 
 ### Automation & Reliability
-- **Auto-retry** with exponential backoff
+- **Auto-retry** with per-task exponential backoff and optional jitter
+- **Dead-letter queue** for permanently failing tasks: inspect, retry or discard them *(new in 0.2)*
+- **Circuit breaker** stops hammering a struggling backend *(new in 0.2)*
+- **Task time-to-live**, **pause / resume**, and debounced **sync-on-enqueue** *(new in 0.2)*
 - **Connectivity awareness** (only syncs when online)
 - **App lifecycle hooks** (syncs on resume)
 - **Background sync** (best-effort, OS-compliant)
@@ -50,6 +60,9 @@ This package solves all of these problems with a **deterministic, crash-safe que
 - **Custom resolvers** for complex scenarios
 
 ### Developer Experience
+- **Reactive UI state**: `stateStream` and per-entity `watchEntity()` for "pending upload" badges, no debug mode needed *(new in 0.2)*
+- **`SyncReport`** returned from every `sync()` *(new in 0.2)*
+- **Testing kit**: `InMemorySyncStore`, `FakeSyncAdapter`, `FakeConnectivityService` *(new in 0.2)*
 - **Debug inspector** (dev-only, zero production overhead)
 - **Sync metrics** (observability without logging)
 - **Event stream** (monitor sync lifecycle)
@@ -68,7 +81,7 @@ This package solves all of these problems with a **deterministic, crash-safe que
 
 ```yaml
 dependencies:
-  flutter_offline_sync_manager: ^0.1.2
+  flutter_offline_sync_manager: ^0.2.0
   hive: ^2.2.3
   hive_flutter: ^1.1.0
 ```
@@ -83,7 +96,7 @@ This package includes adapters for Firestore, REST, and GraphQL. If you use any 
 Example for Firestore usage:
 ```yaml
 dependencies:
-  flutter_offline_sync_manager: ^0.1.2
+  flutter_offline_sync_manager: ^0.2.0
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   cloud_firestore: ^5.0.0  # Your app's version
@@ -262,6 +275,104 @@ class _MyAppState extends State<MyApp> {
   }
 }
 ```
+
+---
+
+## New in 0.2
+
+### Queue compaction
+
+Consecutive changes to the same entity are merged before they hit the network:
+
+| Queued | Then | Result |
+|---|---|---|
+| create | update / upsert | one **create** with the merged payload |
+| update | update | one **update** with the merged payload |
+| update / upsert | delete | one **delete** |
+| create (never sent) | delete | **nothing is sent** |
+
+Tasks already in flight are never merged into. Turn it off with `SyncConfig(coalesceOperations: false)`.
+
+### Priorities and dependencies
+
+```dart
+await syncManager.enqueue(
+  entityType: 'payment',
+  entityId: 'pay-1',
+  operation: SyncOperation.create,
+  payload: payment.toJson(),
+  priority: SyncPriority.critical,          // jumps the queue
+);
+
+await syncManager.enqueue(
+  entityType: 'comment',
+  entityId: 'c-1',
+  operation: SyncOperation.create,
+  payload: comment.toJson(),
+  dependsOn: [EntityRef('post', 'post-1')], // waits until the post is synced
+);
+```
+
+### Reactive state for your UI
+
+```dart
+StreamBuilder<SyncState>(
+  stream: syncManager.stateStream,
+  builder: (context, snap) {
+    final s = snap.data ?? SyncState.initial;
+    if (s.phase == SyncPhase.offline) return const Text('Offline');
+    if (s.deadLetterCount > 0) return Text('${s.deadLetterCount} changes need attention');
+    return Text(s.hasUnsyncedChanges ? '${s.outstandingCount} pending' : 'All synced');
+  },
+);
+
+// Per-item badge
+syncManager.watchEntity('note', note.id); // Stream<EntitySyncStatus>
+```
+
+### Dead-letter queue
+
+Tasks that run out of retries, are rejected as non-retryable (for example an
+`AdapterError` with `retryable: false`, or HTTP 400/404/422 from the REST
+adapter), fail conflict resolution, or outlive `taskTimeToLive` are parked
+instead of being retried forever or silently dropped:
+
+```dart
+final stuck = await syncManager.getDeadLetterTasks();
+await syncManager.retryDeadLetter(stuck.first.taskId); // fresh retry budget
+await syncManager.discardTask(stuck.last.taskId);      // or drop it
+```
+
+### Resilience knobs
+
+```dart
+final syncManager = OfflineSyncManager(
+  store: HiveSyncStore(encryptionCipher: HiveAesCipher(key)),
+  adapter: adapter,
+  connectivityService: DefaultConnectivityService(),
+  retryPolicy: const RetryPolicy(maxRetries: 6, jitter: 0.2),
+  config: const SyncConfig(
+    circuitBreaker: CircuitBreakerConfig(failureThreshold: 5, cooldown: Duration(minutes: 2)),
+    taskTimeToLive: Duration(days: 7),
+    syncOnEnqueueDebounce: Duration(seconds: 2),
+  ),
+);
+
+final report = await syncManager.sync();  // SyncReport: succeeded, failed, deadLettered, ...
+syncManager.pause();                      // e.g. user toggled "sync on Wi-Fi only"
+syncManager.resume();
+```
+
+### Testing
+
+```dart
+import 'package:flutter_offline_sync_manager/testing.dart';
+
+final adapter = FakeSyncAdapter()..failNext(1, error: 'HTTP 503');
+final manager = OfflineSyncManager(store: InMemorySyncStore(), adapter: adapter);
+```
+
+See the [CHANGELOG](CHANGELOG.md) for migration notes from 0.1.x.
 
 ---
 
