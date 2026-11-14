@@ -269,4 +269,3 @@ class RestSyncAdapter implements SyncAdapter {
     return SyncResult.allFailed(errors);
   }
 }
-

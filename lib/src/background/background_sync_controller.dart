@@ -22,4 +22,3 @@ abstract class BackgroundSyncController {
   /// Checks if background sync is currently registered.
   Future<bool> isRegistered();
 }
-

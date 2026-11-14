@@ -62,7 +62,8 @@ class RetryPolicy {
     final exponent = failureCount < 1 ? 0 : failureCount - 1;
     final delay = _exponential(exponent);
     if (jitter == 0) return delay;
-    final factor = 1 + ((random ?? _sharedRandom).nextDouble() * 2 - 1) * jitter;
+    final factor =
+        1 + ((random ?? _sharedRandom).nextDouble() * 2 - 1) * jitter;
     return Duration(microseconds: (delay.inMicroseconds * factor).round());
   }
 

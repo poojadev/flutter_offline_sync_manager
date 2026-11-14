@@ -41,9 +41,11 @@ void main() {
   group('QueueScheduler.selectBatch', () {
     test('orders by priority, then age', () {
       final ids = select([
-        task('a', '1', SyncOperation.create, minute: 0, priority: SyncPriority.low),
+        task('a', '1', SyncOperation.create,
+            minute: 0, priority: SyncPriority.low),
         task('a', '2', SyncOperation.create, minute: 1),
-        task('a', '3', SyncOperation.create, minute: 2, priority: SyncPriority.critical),
+        task('a', '3', SyncOperation.create,
+            minute: 2, priority: SyncPriority.critical),
         task('a', '4', SyncOperation.create, minute: 3),
       ]);
       expect(ids, ['a_3_create', 'a_2_create', 'a_4_create', 'a_1_create']);
@@ -51,7 +53,8 @@ void main() {
 
     test('sends one task per entity, oldest first', () {
       final ids = select([
-        task('n', '1', SyncOperation.update, minute: 1, priority: SyncPriority.critical),
+        task('n', '1', SyncOperation.update,
+            minute: 1, priority: SyncPriority.critical),
         task('n', '1', SyncOperation.create, minute: 0),
       ]);
       expect(ids, ['n_1_create'],
@@ -79,8 +82,7 @@ void main() {
           minute: 1, dependsOn: const [EntityRef('post', 'p1')]);
       expect(select([post, comment]), ['post_p1_create']);
       expect(select([comment]), ['comment_c1_create']);
-      expect(
-          select([post..status = SyncStatus.synced, comment]),
+      expect(select([post..status = SyncStatus.synced, comment]),
           ['comment_c1_create']);
     });
 
@@ -104,7 +106,8 @@ void main() {
 
     test('limits the batch size', () {
       final tasks = [
-        for (var i = 0; i < 5; i++) task('n', '$i', SyncOperation.create, minute: i)
+        for (var i = 0; i < 5; i++)
+          task('n', '$i', SyncOperation.create, minute: i)
       ];
       expect(select(tasks, limit: 2), ['n_0_create', 'n_1_create']);
     });

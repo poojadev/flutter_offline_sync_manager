@@ -74,4 +74,3 @@ export 'src/adapters/firebase/firestore_sync_adapter.dart';
 export 'src/adapters/firebase/firestore_sync_config.dart';
 export 'src/adapters/graphql/graphql_sync_adapter.dart';
 export 'src/adapters/graphql/graphql_sync_config.dart';
-

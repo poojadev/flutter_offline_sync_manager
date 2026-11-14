@@ -50,15 +50,13 @@ class SyncReport {
   });
 
   /// A report for a sync that was skipped.
-  const SyncReport.skipped(SyncSkipReason reason)
-      : this(skippedReason: reason);
+  const SyncReport.skipped(SyncSkipReason reason) : this(skippedReason: reason);
 
   /// Whether the sync was skipped.
   bool get wasSkipped => skippedReason != null;
 
   /// Whether every attempted task succeeded.
-  bool get isCleanRun =>
-      !wasSkipped && failed == 0 && deadLettered == 0;
+  bool get isCleanRun => !wasSkipped && failed == 0 && deadLettered == 0;
 
   @override
   String toString() => wasSkipped

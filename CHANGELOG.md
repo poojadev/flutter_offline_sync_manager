@@ -34,7 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `taskRevived`, `circuitOpened`, `circuitClosed`, `paused`, `resumed`) and metrics.
 - A test suite (51 tests).
 
+### Changed
+- Widened dependency ranges to support the latest releases:
+  `cloud_firestore >=4.0.0 <8.0.0`, `connectivity_plus >=6.0.0 <8.0.0`.
+- **`workmanager` now requires `^0.10.0`** (was `^0.5.2`). Its API changed
+  (`NetworkType.notRequired`, `isInDebugMode` removed), so 0.5.x is no
+  longer supported. Apps pinning an older `workmanager` must upgrade.
+- Source formatted with `dart format`.
+
 ### Fixed
+- Static analysis warning in the Android background dispatcher
+  (returning a `Future` without `await` inside `try`).
 - **Automatic retries never ran**: the retry timer was only scheduled while a
   sync was still marked as running, so it was always skipped.
 - **Edits made during an in-flight sync could be lost**: the acknowledgment

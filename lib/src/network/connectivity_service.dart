@@ -108,4 +108,3 @@ class DefaultConnectivityService implements ConnectivityService {
     _controller.close();
   }
 }
-

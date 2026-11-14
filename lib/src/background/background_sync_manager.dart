@@ -145,4 +145,3 @@ class BackgroundSyncManager {
     return await _controller!.isRegistered();
   }
 }
-

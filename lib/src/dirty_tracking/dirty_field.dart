@@ -55,4 +55,3 @@ class DirtyField {
   @override
   int get hashCode => fieldPath.hashCode ^ updatedAt.hashCode;
 }
-

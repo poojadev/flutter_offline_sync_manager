@@ -41,4 +41,3 @@ class AppLifecycleObserver extends WidgetsBindingObserver {
     }
   }
 }
-

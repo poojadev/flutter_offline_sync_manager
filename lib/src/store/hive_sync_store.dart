@@ -150,7 +150,7 @@ class SyncTaskAdapter extends TypeAdapter<SyncTask> {
   @override
   SyncTask read(BinaryReader reader) {
     final map = Map<String, dynamic>.from(reader.readMap());
-    
+
     // Parse optional dirty state
     DirtyState? dirtyState;
     if (map['dirtyState'] != null) {
@@ -158,7 +158,7 @@ class SyncTaskAdapter extends TypeAdapter<SyncTask> {
         Map<String, dynamic>.from(map['dirtyState'] as Map),
       );
     }
-    
+
     return SyncTask(
       entityType: map['entityType'] as String,
       entityId: map['entityId'] as String,
@@ -208,13 +208,12 @@ class SyncTaskAdapter extends TypeAdapter<SyncTask> {
       'revision': obj.revision,
       'nextAttemptAt': obj.nextAttemptAt?.toIso8601String(),
     };
-    
+
     // Include dirty state if present
     if (obj.dirtyState != null) {
       map['dirtyState'] = obj.dirtyState!.toMap();
     }
-    
+
     writer.writeMap(map);
   }
 }
-

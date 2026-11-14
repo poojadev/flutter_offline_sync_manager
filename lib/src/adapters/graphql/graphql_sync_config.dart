@@ -50,8 +50,8 @@ class GraphQLSyncConfig {
   /// Function to extract server data for conflicts from GraphQL response.
   ///
   /// Default: Looks for 'conflicts' in response data
-  final Map<String, Map<String, dynamic>> Function(Map<String, dynamic> responseData)?
-      extractServerData;
+  final Map<String, Map<String, dynamic>> Function(
+      Map<String, dynamic> responseData)? extractServerData;
 
   /// Optional hook called before sending each task.
   ///
@@ -78,4 +78,3 @@ class GraphQLSyncConfig {
     this.afterResponse,
   });
 }
-

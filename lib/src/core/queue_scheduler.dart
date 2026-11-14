@@ -46,7 +46,8 @@ class QueueScheduler {
       final next = task.nextAttemptAt;
       if (!ignoreBackoff && next != null && next.isAfter(now)) continue;
       final blocked = task.dependsOn.any(
-        (dep) => dep.key != task.entityKey && outstandingEntities.contains(dep.key),
+        (dep) =>
+            dep.key != task.entityKey && outstandingEntities.contains(dep.key),
       );
       if (blocked) continue;
       ready.add(task);
@@ -54,7 +55,9 @@ class QueueScheduler {
 
     ready.sort((a, b) {
       final byPriority = b.priority.index.compareTo(a.priority.index);
-      return byPriority != 0 ? byPriority : QueueCompactor.compareQueueOrder(a, b);
+      return byPriority != 0
+          ? byPriority
+          : QueueCompactor.compareQueueOrder(a, b);
     });
     return ready.take(limit).toList();
   }

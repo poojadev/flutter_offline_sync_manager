@@ -42,9 +42,8 @@ class IOSBackgroundSyncController implements BackgroundSyncController {
           requiresBatteryNotLow: !_config.allowLowBattery,
           requiresCharging: _config.requiresCharging,
           requiresDeviceIdle: false,
-          requiredNetworkType: _config.requiresNetwork
-              ? NetworkType.ANY
-              : NetworkType.NONE,
+          requiredNetworkType:
+              _config.requiresNetwork ? NetworkType.ANY : NetworkType.NONE,
         ),
         _onBackgroundFetch,
         _onBackgroundFetchTimeout,
@@ -78,7 +77,7 @@ class IOSBackgroundSyncController implements BackgroundSyncController {
     try {
       // Execute sync callback
       await _syncCallback();
-      
+
       // Signal completion to iOS
       BackgroundFetch.finish(taskId);
     } catch (e) {
@@ -94,4 +93,3 @@ class IOSBackgroundSyncController implements BackgroundSyncController {
     BackgroundFetch.finish(taskId);
   }
 }
-

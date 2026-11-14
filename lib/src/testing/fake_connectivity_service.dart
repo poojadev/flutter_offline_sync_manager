@@ -3,8 +3,7 @@ import '../network/connectivity_service.dart';
 
 /// Controllable [ConnectivityService] for tests and demos.
 class FakeConnectivityService implements ConnectivityService {
-  final StreamController<bool> _controller =
-      StreamController<bool>.broadcast();
+  final StreamController<bool> _controller = StreamController<bool>.broadcast();
   bool _online;
 
   /// Creates a [FakeConnectivityService], online by default.

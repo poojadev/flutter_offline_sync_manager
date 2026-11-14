@@ -312,8 +312,7 @@ class OfflineSyncManager {
     });
 
     if (plan.kind == CompactionKind.annihilated && _dirtyTracker != null) {
-      await _dirtyTracker!
-          .clearAll(entityType: entityType, entityId: entityId);
+      await _dirtyTracker!.clearAll(entityType: entityType, entityId: entityId);
     }
 
     final taskId = plan.save?.taskId ?? incoming.taskId;
@@ -324,7 +323,8 @@ class OfflineSyncManager {
             entityType: entityType,
             message: 'Change merged into queued task',
             metadata: {'removed': plan.remove});
-        _safeUpdateMetrics(() => _debugController?.metrics.incrementCoalesced());
+        _safeUpdateMetrics(
+            () => _debugController?.metrics.incrementCoalesced());
         break;
       case CompactionKind.annihilated:
         _safeEmitEvent(SyncEventType.taskAnnihilated,
@@ -332,7 +332,8 @@ class OfflineSyncManager {
             entityType: entityType,
             message: 'Create and delete cancelled out; nothing to send',
             metadata: {'removed': plan.remove});
-        _safeUpdateMetrics(() => _debugController?.metrics.incrementCoalesced());
+        _safeUpdateMetrics(
+            () => _debugController?.metrics.incrementCoalesced());
         break;
       case CompactionKind.appended:
       case CompactionKind.replaced:
@@ -582,9 +583,8 @@ class OfflineSyncManager {
 
     final nextRetry = _state.nextRetryAt;
     if (nextRetry != null) {
-      final delay = nextRetry.isAfter(now)
-          ? nextRetry.difference(now)
-          : Duration.zero;
+      final delay =
+          nextRetry.isAfter(now) ? nextRetry.difference(now) : Duration.zero;
       _scheduleSync(delay);
       _safeEmitEvent(
         SyncEventType.retryScheduled,
@@ -790,8 +790,8 @@ class OfflineSyncManager {
       final permanent = e is AdapterError && !e.retryable;
       await _lock.run(() async {
         for (final task in batch) {
-          outcome.add(await _recordFailure(task, e.toString(),
-              permanent: permanent));
+          outcome.add(
+              await _recordFailure(task, e.toString(), permanent: permanent));
         }
       });
       _recordBreaker(outcome);
@@ -827,8 +827,7 @@ class OfflineSyncManager {
               metadata: conflict.metadata);
           _safeUpdateMetrics(
               () => _debugController?.metrics.incrementConflictsDetected());
-          outcome.add(
-              await _handleConflict(sent, conflict.serverData!, error));
+          outcome.add(await _handleConflict(sent, conflict.serverData!, error));
         } else {
           outcome.add(await _recordFailure(sent, error,
               permanent: result.permanentFailureTaskIds.contains(entry.key)));

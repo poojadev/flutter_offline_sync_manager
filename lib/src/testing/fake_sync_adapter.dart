@@ -45,7 +45,8 @@ class FakeSyncAdapter implements SyncAdapter {
   void enqueueResponse(FakeBatchHandler response) => _script.add(response);
 
   /// Fails the next [count] batches entirely with [error].
-  void failNext(int count, {String error = 'Simulated failure', bool permanent = false}) {
+  void failNext(int count,
+      {String error = 'Simulated failure', bool permanent = false}) {
     for (var i = 0; i < count; i++) {
       _script.add((batch) => SyncResult.allFailed(
             {for (final t in batch) t.taskId: error},

@@ -32,14 +32,17 @@ void main() {
       expect(plan.kind, CompactionKind.merged);
       expect(plan.save!.operation, SyncOperation.create);
       expect(plan.save!.payload, {'title': 'b', 'body': 'x'});
-      expect(plan.save!.createdAt, prev.createdAt, reason: 'keeps queue position');
+      expect(plan.save!.createdAt, prev.createdAt,
+          reason: 'keeps queue position');
       expect(plan.save!.revision, prev.revision + 1);
       expect(plan.remove, isEmpty, reason: 'same taskId is overwritten');
     });
 
     test('update + upsert becomes upsert and drops the old task id', () {
       final plan = QueueCompactor.plan(
-        existing: [task(SyncOperation.update, {'a': 1})],
+        existing: [
+          task(SyncOperation.update, {'a': 1})
+        ],
         incoming: task(SyncOperation.upsert, {'b': 2}, minute: 1),
       );
       expect(plan.save!.operation, SyncOperation.upsert);
@@ -49,7 +52,9 @@ void main() {
 
     test('update + delete becomes a delete', () {
       final plan = QueueCompactor.plan(
-        existing: [task(SyncOperation.update, {'a': 1})],
+        existing: [
+          task(SyncOperation.update, {'a': 1})
+        ],
         incoming: task(SyncOperation.delete, {}, minute: 1),
       );
       expect(plan.kind, CompactionKind.merged);
@@ -59,7 +64,9 @@ void main() {
 
     test('create + delete of a never-sent entity annihilates', () {
       final plan = QueueCompactor.plan(
-        existing: [task(SyncOperation.create, {'a': 1})],
+        existing: [
+          task(SyncOperation.create, {'a': 1})
+        ],
         incoming: task(SyncOperation.delete, {}, minute: 1),
       );
       expect(plan.kind, CompactionKind.annihilated);
@@ -91,8 +98,8 @@ void main() {
     });
 
     test('same-id overwrite of an in-flight task bumps the revision', () {
-      final inFlight = task(SyncOperation.update, {'a': 1},
-          status: SyncStatus.syncing);
+      final inFlight =
+          task(SyncOperation.update, {'a': 1}, status: SyncStatus.syncing);
       final plan = QueueCompactor.plan(
         existing: [inFlight],
         incoming: task(SyncOperation.update, {'a': 2}, minute: 5),
@@ -115,7 +122,9 @@ void main() {
 
     test('coalesce: false keeps separate tasks', () {
       final plan = QueueCompactor.plan(
-        existing: [task(SyncOperation.create, {'a': 1})],
+        existing: [
+          task(SyncOperation.create, {'a': 1})
+        ],
         incoming: task(SyncOperation.update, {'a': 2}, minute: 1),
         coalesce: false,
       );

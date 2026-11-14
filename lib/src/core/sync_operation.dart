@@ -13,4 +13,3 @@ enum SyncOperation {
   /// This is the preferred operation as it handles both cases.
   upsert,
 }
-

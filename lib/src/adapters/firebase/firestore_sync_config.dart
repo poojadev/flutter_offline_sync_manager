@@ -49,4 +49,3 @@ class FirestoreSyncConfig {
     return FirestoreSyncConfig(collectionPath: collectionPath);
   }
 }
-

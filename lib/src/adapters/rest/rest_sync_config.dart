@@ -53,14 +53,13 @@ class RestSyncConfig {
     bool Function(int)? isRetryableStatusCode,
     this.beforeSend,
     this.afterResponse,
-  })  : isConflictStatusCode = isConflictStatusCode ??
-            ((code) => code == 409 || code == 412),
-        isRetryableStatusCode = isRetryableStatusCode ??
-            ((code) => code >= 500 || code == 408);
+  })  : isConflictStatusCode =
+            isConflictStatusCode ?? ((code) => code == 409 || code == 412),
+        isRetryableStatusCode =
+            isRetryableStatusCode ?? ((code) => code >= 500 || code == 408);
 
   /// Creates a [RestSyncConfig] with default values.
   factory RestSyncConfig.defaults(String endpoint) {
     return RestSyncConfig(endpoint: endpoint);
   }
 }
-

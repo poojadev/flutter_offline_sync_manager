@@ -105,8 +105,8 @@ void main() {
   });
 
   test('failed tasks wait for their backoff delay', () async {
-    final m = build(
-        retryPolicy: const RetryPolicy(baseDelay: Duration(seconds: 10)));
+    final m =
+        build(retryPolicy: const RetryPolicy(baseDelay: Duration(seconds: 10)));
     await put(m, 'n1', SyncOperation.update);
     adapter.failNext(1, error: 'HTTP 503');
 
@@ -241,7 +241,8 @@ void main() {
 
   test('serverWins conflict resolution completes the task', () async {
     final m = build(
-        config: const SyncConfig(conflictStrategy: ConflictStrategy.serverWins));
+        config:
+            const SyncConfig(conflictStrategy: ConflictStrategy.serverWins));
     await put(m, 'n1', SyncOperation.update, {'v': 1});
     adapter.enqueueResponse((batch) => SyncResult(
           successTaskIds: const {},
@@ -306,14 +307,15 @@ void main() {
   });
 
   test('tasks past their time-to-live are dead-lettered', () async {
-    final m = build(
-        config: const SyncConfig(taskTimeToLive: Duration(hours: 1)));
+    final m =
+        build(config: const SyncConfig(taskTimeToLive: Duration(hours: 1)));
     await put(m, 'n1', SyncOperation.update);
     now = now.add(const Duration(hours: 2));
     final report = await m.sync();
     expect(report.deadLettered, 1);
     expect(adapter.batches, isEmpty);
-    expect((await m.getDeadLetterTasks()).single.lastError, contains('Expired'));
+    expect(
+        (await m.getDeadLetterTasks()).single.lastError, contains('Expired'));
   });
 
   test('synced tasks are kept for the retention window', () async {
@@ -405,8 +407,8 @@ void main() {
       store: store,
       adapter: adapter,
       connectivityService: connectivity,
-      config: const SyncConfig(
-          syncOnEnqueueDebounce: Duration(milliseconds: 30)),
+      config:
+          const SyncConfig(syncOnEnqueueDebounce: Duration(milliseconds: 30)),
     );
     managers.add(m);
     m.enableAutoSync();
@@ -438,7 +440,10 @@ void main() {
   test('debug controller sees new event types', () async {
     final debug = SyncDebugController(store: store)..enable();
     final m = OfflineSyncManager(
-        store: store, adapter: adapter, debugController: debug, clock: () => now);
+        store: store,
+        adapter: adapter,
+        debugController: debug,
+        clock: () => now);
     managers.add(m);
     final events = <SyncEventType>[];
     final sub = debug.events.listen((e) => events.add(e.type));
@@ -450,10 +455,12 @@ void main() {
     await pumpEventQueue();
     await sub.cancel();
 
-    expect(events, containsAll([
-      SyncEventType.taskCoalesced,
-      SyncEventType.taskDeadLettered,
-    ]));
+    expect(
+        events,
+        containsAll([
+          SyncEventType.taskCoalesced,
+          SyncEventType.taskDeadLettered,
+        ]));
     final snapshot = await m.getDebugSnapshot();
     expect(snapshot!.deadLetterTasks, 1);
     expect(debug.metrics.totalTasksCoalesced, 1);

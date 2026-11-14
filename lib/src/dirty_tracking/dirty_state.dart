@@ -154,4 +154,3 @@ class DirtyState {
   /// Gets the list of all dirty field paths.
   List<String> get dirtyFieldPaths => dirtyFields.keys.toList();
 }
-

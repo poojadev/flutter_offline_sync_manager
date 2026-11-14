@@ -141,7 +141,7 @@ class SyncDebugController {
     try {
       // Read every task. This is read-only: it never changes task state.
       final allTasks = await _store.getAllTasks();
-      
+
       // Count tasks by status
       int pendingCount = 0;
       int syncingCount = 0;
@@ -207,4 +207,3 @@ class SyncDebugController {
     _eventController.close();
   }
 }
-
