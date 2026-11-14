@@ -117,22 +117,23 @@ class FirestoreSyncAdapter implements SyncAdapter {
 
       for (final task in tasks) {
         try {
-          final docRef = _firestore
-              .collection(_config.collectionPath)
-              .doc(task.entityId);
+          final docRef =
+              _firestore.collection(_config.collectionPath).doc(task.entityId);
 
           final docSnapshot = await transaction.get(docRef);
 
           // Check for conflicts (version mismatch)
           if (docSnapshot.exists) {
-            final serverVersion = docSnapshot.data()?[_config.versionField] as int?;
+            final serverVersion =
+                docSnapshot.data()?[_config.versionField] as int?;
             final localVersion = task.payload[_config.versionField] as int?;
 
             if (serverVersion != null &&
                 localVersion != null &&
                 serverVersion != localVersion) {
               // Conflict detected
-              failedTaskErrors[task.taskId] = 'Version mismatch: server=$serverVersion, local=$localVersion';
+              failedTaskErrors[task.taskId] =
+                  'Version mismatch: server=$serverVersion, local=$localVersion';
               serverData[task.taskId] = docSnapshot.data()!;
               continue;
             }
@@ -197,21 +198,22 @@ class FirestoreSyncAdapter implements SyncAdapter {
 
     for (final task in tasks) {
       try {
-        final docRef = _firestore
-            .collection(_config.collectionPath)
-            .doc(task.entityId);
+        final docRef =
+            _firestore.collection(_config.collectionPath).doc(task.entityId);
 
         // Check for conflicts (read first)
         final docSnapshot = await docRef.get();
         if (docSnapshot.exists) {
-          final serverVersion = docSnapshot.data()?[_config.versionField] as int?;
+          final serverVersion =
+              docSnapshot.data()?[_config.versionField] as int?;
           final localVersion = task.payload[_config.versionField] as int?;
 
           if (serverVersion != null &&
               localVersion != null &&
               serverVersion != localVersion) {
             // Conflict detected
-            failedTaskErrors[task.taskId] = 'Version mismatch: server=$serverVersion, local=$localVersion';
+            failedTaskErrors[task.taskId] =
+                'Version mismatch: server=$serverVersion, local=$localVersion';
             serverData[task.taskId] = docSnapshot.data()!;
             continue;
           }
@@ -295,4 +297,3 @@ class FirestoreSyncAdapter implements SyncAdapter {
     return data;
   }
 }
-

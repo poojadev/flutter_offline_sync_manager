@@ -20,6 +20,9 @@ class SyncDebugSnapshot {
   /// Number of tasks successfully synced.
   final int syncedTasks;
 
+  /// Number of tasks parked in the dead-letter queue.
+  final int deadLetterTasks;
+
   /// Timestamp of the last sync operation, if any.
   final DateTime? lastSyncTime;
 
@@ -39,6 +42,7 @@ class SyncDebugSnapshot {
     required this.syncingTasks,
     required this.failedTasks,
     required this.syncedTasks,
+    this.deadLetterTasks = 0,
     this.lastSyncTime,
     required this.isSyncing,
     this.isOnline,
@@ -66,6 +70,7 @@ class SyncDebugSnapshot {
     buffer.writeln('  syncingTasks: $syncingTasks');
     buffer.writeln('  failedTasks: $failedTasks');
     buffer.writeln('  syncedTasks: $syncedTasks');
+    buffer.writeln('  deadLetterTasks: $deadLetterTasks');
     if (lastSyncTime != null) {
       buffer.writeln('  lastSyncTime: $lastSyncTime');
     }
@@ -88,6 +93,7 @@ class SyncDebugSnapshot {
       'syncingTasks': syncingTasks,
       'failedTasks': failedTasks,
       'syncedTasks': syncedTasks,
+      'deadLetterTasks': deadLetterTasks,
       'lastSyncTime': lastSyncTime?.toIso8601String(),
       'isSyncing': isSyncing,
       'isOnline': isOnline,
@@ -95,4 +101,3 @@ class SyncDebugSnapshot {
     };
   }
 }
-

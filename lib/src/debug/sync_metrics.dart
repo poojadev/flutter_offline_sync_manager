@@ -23,6 +23,12 @@ class SyncMetrics {
   /// Total number of conflicts resolved.
   int totalConflictsResolved = 0;
 
+  /// Total number of changes merged into already-queued tasks.
+  int totalTasksCoalesced = 0;
+
+  /// Total number of tasks moved to the dead-letter queue.
+  int totalTasksDeadLettered = 0;
+
   /// Duration of the last sync operation in milliseconds.
   int? lastSyncDuration;
 
@@ -67,6 +73,16 @@ class SyncMetrics {
     totalConflictsResolved++;
   }
 
+  /// Increments the coalesced tasks counter.
+  void incrementCoalesced() {
+    totalTasksCoalesced++;
+  }
+
+  /// Increments the dead-lettered tasks counter.
+  void incrementDeadLettered() {
+    totalTasksDeadLettered++;
+  }
+
   /// Records a sync duration.
   ///
   /// [durationMs] - Duration of the sync in milliseconds.
@@ -106,6 +122,8 @@ class SyncMetrics {
     totalRetries = 0;
     totalConflictsDetected = 0;
     totalConflictsResolved = 0;
+    totalTasksCoalesced = 0;
+    totalTasksDeadLettered = 0;
     lastSyncDuration = null;
     _recentSyncDurations.clear();
   }
@@ -121,6 +139,8 @@ class SyncMetrics {
       'totalRetries': totalRetries,
       'totalConflictsDetected': totalConflictsDetected,
       'totalConflictsResolved': totalConflictsResolved,
+      'totalTasksCoalesced': totalTasksCoalesced,
+      'totalTasksDeadLettered': totalTasksDeadLettered,
       'lastSyncDuration': lastSyncDuration,
       'averageSyncDuration': averageSyncDuration,
       'syncCountForAverage': syncCountForAverage,
@@ -135,9 +155,10 @@ class SyncMetrics {
         'failed: $totalTasksFailed, '
         'retries: $totalRetries, '
         'conflicts: $totalConflictsDetected/$totalConflictsResolved, '
+        'coalesced: $totalTasksCoalesced, '
+        'deadLettered: $totalTasksDeadLettered, '
         'lastDuration: ${lastSyncDuration}ms, '
         'avgDuration: ${averageSyncDuration}ms'
         ')';
   }
 }
-

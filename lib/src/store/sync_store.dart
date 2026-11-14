@@ -4,6 +4,10 @@ import '../core/sync_task.dart';
 ///
 /// This abstraction allows for different storage implementations
 /// (Hive, SQLite, etc.) without coupling the manager to a specific solution.
+///
+/// Implementations should return independent copies (or treat returned
+/// tasks as read-only): the manager never mutates tasks it reads, it saves
+/// modified copies instead.
 abstract class SyncStore {
   /// Saves or updates a sync task.
   ///
@@ -16,11 +20,22 @@ abstract class SyncStore {
   /// This method must be idempotent and crash-safe.
   Future<void> updateTask(SyncTask task);
 
+  /// Returns the task with [taskId], or null if it doesn't exist.
+  Future<SyncTask?> getTask(String taskId);
+
+  /// Returns every task in the store, in any status.
+  Future<List<SyncTask>> getAllTasks();
+
+  /// Deletes the task with [taskId]. Deleting a missing task is a no-op.
+  Future<void> deleteTask(String taskId);
+
   /// Retrieves pending tasks that are ready to be synced.
   ///
-  /// Returns tasks with status [SyncStatus.pending] or [SyncStatus.failed]
-  /// that have not exceeded the maximum retry count.
-  /// Results are limited to [limit] tasks.
+  /// Returns tasks with status [SyncStatus.pending], [SyncStatus.failed] or
+  /// [SyncStatus.syncing], oldest first, limited to [limit] tasks.
+  ///
+  /// Kept for backwards compatibility; [OfflineSyncManager] uses
+  /// [getAllTasks] to schedule work.
   Future<List<SyncTask>> getPendingTasks(int limit);
 
   /// Marks a task as currently being synced.
@@ -41,4 +56,3 @@ abstract class SyncStore {
   /// Must be idempotent and crash-safe.
   Future<void> markFailed(String taskId, String error);
 }
-

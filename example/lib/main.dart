@@ -11,10 +11,10 @@ import 'package:hive_flutter/hive_flutter.dart';
 /// - Basic error handling
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Initialize Hive (required for persistent storage)
   await Hive.initFlutter();
-  
+
   runApp(const SyncExampleApp());
 }
 
@@ -206,4 +206,3 @@ class MockSyncAdapter implements SyncAdapter {
     return SyncResult.allSuccess(successTaskIds);
   }
 }
-

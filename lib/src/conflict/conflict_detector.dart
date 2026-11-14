@@ -178,4 +178,3 @@ class DefaultConflictDetector implements ConflictDetector {
     return null;
   }
 }
-

@@ -1,13 +1,21 @@
 import 'dart:async';
+import '../core/entity_ref.dart';
+import '../core/queue_compactor.dart';
+import '../core/queue_scheduler.dart';
 import '../core/sync_task.dart';
 import '../core/sync_operation.dart';
+import '../core/sync_priority.dart';
+import '../core/sync_report.dart';
+import '../core/sync_state.dart';
 import '../core/sync_status.dart';
 import '../core/sync_result.dart';
 import '../core/sync_config.dart';
 import '../store/sync_store.dart';
 import '../adapter/sync_adapter.dart';
+import '../adapters/adapter_errors.dart';
 import '../network/connectivity_service.dart';
 import '../retry/retry_policy.dart';
+import '../resilience/circuit_breaker.dart';
 import '../lifecycle/app_lifecycle_observer.dart';
 import '../conflict/conflict_detector.dart';
 import '../conflict/conflict_resolution.dart';
@@ -25,12 +33,17 @@ import '../debug/sync_event_type.dart';
 ///
 /// Responsibilities:
 /// - Prevents duplicate sync tasks using deterministic taskIds
+/// - Compacts the queue by merging consecutive changes to the same entity
 /// - Prevents parallel sync execution (single-flight pattern)
-/// - Manages task lifecycle (pending -> syncing -> synced/failed)
-/// - Handles batch sync with partial success support
+/// - Sends tasks by priority while keeping per-entity order and dependencies
+/// - Manages task lifecycle (pending -> syncing -> synced/failed/deadLetter)
+/// - Handles batch sync with partial success support, draining the queue
 /// - Ensures crash-safety and restart-safety
-/// - Auto-syncs on network reconnect and app resume
-/// - Implements retry backoff to prevent sync storms
+/// - Never marks a change as synced if it was edited while in flight
+/// - Auto-syncs on network reconnect, app resume and (optionally) enqueue
+/// - Per-task exponential backoff, a dead-letter queue and a circuit breaker
+///   to prevent sync storms
+/// - Exposes reactive [SyncState] and per-entity status streams for UI
 class OfflineSyncManager {
   final SyncStore _store;
   final SyncAdapter _adapter;
@@ -41,35 +54,47 @@ class OfflineSyncManager {
   final ConflictResolver _conflictResolver;
   final DirtyTracker? _dirtyTracker;
   final SyncDebugController? _debugController;
+  final CircuitBreaker? _circuitBreaker;
+  final DateTime Function() _clock;
 
-  /// Flag to prevent parallel sync execution.
-  bool _isSyncing = false;
+  /// Serializes read-modify-write sequences on the store so enqueue and
+  /// result handling never interleave.
+  final _AsyncLock _lock = _AsyncLock();
 
-  /// Completer for the current sync operation, if any.
-  Completer<void>? _syncCompleter;
+  /// The sync currently running, if any (single-flight).
+  Future<SyncReport>? _inFlight;
 
-  /// Stream subscription for connectivity changes.
+  /// Set when an auto-sync trigger fires during a running sync.
+  bool _rerunRequested = false;
+
   StreamSubscription<bool>? _connectivitySubscription;
-
-  /// App lifecycle observer for detecting app resume.
   AppLifecycleObserver? _lifecycleObserver;
-
-  /// Timer for delayed retry attempts.
   Timer? _retryTimer;
+  Timer? _enqueueDebounceTimer;
 
-  /// Whether auto-sync is enabled.
   bool _autoSyncEnabled = false;
-
-  /// Whether the manager has been disposed.
   bool _isDisposed = false;
+  bool _paused = false;
+
+  /// Last createdAt handed out, used to keep enqueue order strictly monotonic.
+  DateTime? _lastEnqueueAt;
+
+  final StreamController<SyncState> _stateController =
+      StreamController<SyncState>.broadcast();
+  final StreamController<List<SyncTask>> _tasksController =
+      StreamController<List<SyncTask>>.broadcast();
+  SyncState _state = SyncState.initial;
+  List<SyncTask>? _tasksSnapshot;
 
   /// Creates an [OfflineSyncManager] with the given store, adapter, and config.
   ///
   /// Optionally accepts [connectivityService] for network awareness.
   /// If provided, enables auto-sync on network reconnect.
   ///
-  /// Optionally accepts [retryPolicy] for configuring retry backoff.
-  /// If not provided, uses default retry policy.
+  /// Optionally accepts [retryPolicy] for configuring retry backoff. If not
+  /// provided, a default policy with `config.maxRetries` is used.
+  ///
+  /// [clock] can be overridden in tests.
   OfflineSyncManager({
     required SyncStore store,
     required SyncAdapter adapter,
@@ -79,6 +104,7 @@ class OfflineSyncManager {
     ConflictDetector? conflictDetector,
     DirtyTracker? dirtyTracker,
     SyncDebugController? debugController,
+    DateTime Function()? clock,
   })  : _store = store,
         _adapter = adapter,
         _config = config ?? SyncConfig.defaults(),
@@ -90,7 +116,13 @@ class OfflineSyncManager {
         ),
         _dirtyTracker = dirtyTracker,
         _debugController = debugController,
-        _retryPolicy = retryPolicy ?? RetryPolicy.defaults();
+        _clock = clock ?? DateTime.now,
+        _circuitBreaker = config?.circuitBreaker == null
+            ? null
+            : CircuitBreaker(config!.circuitBreaker!, clock: clock),
+        _retryPolicy = retryPolicy ??
+            RetryPolicy(
+                maxRetries: (config ?? SyncConfig.defaults()).maxRetries);
 
   /// Creates the appropriate conflict resolver based on strategy.
   static ConflictResolver _createConflictResolver(
@@ -117,19 +149,105 @@ class OfflineSyncManager {
     }
   }
 
-  /// Enqueues a new sync task or updates an existing one.
+  // ---------------------------------------------------------------------------
+  // Public state
+  // ---------------------------------------------------------------------------
+
+  /// Latest known engine state.
+  SyncState get state => _state;
+
+  /// Stream of engine state. Emits the current state on listen, then every
+  /// change. Works without debug mode.
+  Stream<SyncState> get stateStream => _replaying<SyncState>(
+        source: _stateController.stream,
+        initial: () async {
+          await _ensureSnapshot();
+          return _state;
+        },
+      );
+
+  /// Whether a sync is currently running.
+  bool get isSyncing => _inFlight != null;
+
+  /// Whether syncing is paused (see [pause]).
+  bool get isPaused => _paused;
+
+  /// Whether auto-sync triggers are enabled.
+  bool get isAutoSyncEnabled => _autoSyncEnabled;
+
+  /// Current circuit breaker state, or null if no breaker is configured.
+  CircuitState? get circuitState => _circuitBreaker?.state;
+
+  /// Watches the sync status of one entity, for "pending upload" badges.
   ///
-  /// If a task with the same entityType, entityId, and operation already exists,
-  /// it will be overwritten with the new payload. This prevents duplicates
-  /// and ensures the latest data is synced.
+  /// Emits the current status on listen, then whenever it changes.
+  Stream<EntitySyncStatus> watchEntity(String entityType, String entityId) {
+    final key = EntityRef.entityKey(entityType, entityId);
+    EntitySyncStatus? last;
+    late final StreamController<EntitySyncStatus> controller;
+    StreamSubscription<List<SyncTask>>? sub;
+    var gotLiveUpdate = false;
+
+    void push(List<SyncTask> tasks) {
+      final status =
+          QueueScheduler.entityStatus(tasks.where((t) => t.entityKey == key));
+      if (status != last && !controller.isClosed) {
+        last = status;
+        controller.add(status);
+      }
+    }
+
+    controller = StreamController<EntitySyncStatus>(
+      onListen: () async {
+        sub = _tasksController.stream.listen((tasks) {
+          gotLiveUpdate = true;
+          push(tasks);
+        });
+        final tasks = await _ensureSnapshot();
+        if (!gotLiveUpdate) push(tasks);
+      },
+      onCancel: () => sub?.cancel(),
+    );
+    return controller.stream;
+  }
+
+  /// Current sync status of one entity.
+  Future<EntitySyncStatus> getEntityStatus(
+      String entityType, String entityId) async {
+    final key = EntityRef.entityKey(entityType, entityId);
+    final tasks = await _store.getAllTasks();
+    return QueueScheduler.entityStatus(tasks.where((t) => t.entityKey == key));
+  }
+
+  /// Returns tasks in the queue, optionally filtered by [status].
+  Future<List<SyncTask>> getTasks({SyncStatus? status}) async {
+    final tasks = await _store.getAllTasks();
+    final filtered = status == null
+        ? tasks
+        : tasks.where((t) => t.status == status).toList();
+    return filtered..sort(QueueCompactor.compareQueueOrder);
+  }
+
+  /// Tasks that failed permanently and need attention.
+  Future<List<SyncTask>> getDeadLetterTasks() =>
+      getTasks(status: SyncStatus.deadLetter);
+
+  // ---------------------------------------------------------------------------
+  // Enqueue
+  // ---------------------------------------------------------------------------
+
+  /// Enqueues a new sync task or folds it into the existing queue.
   ///
-  /// The taskId is deterministic and derived from:
-  /// - entityType
-  /// - entityId
-  /// - operation
+  /// The taskId is deterministic (entityType + entityId + operation), so
+  /// repeated changes never create duplicates. With
+  /// [SyncConfig.coalesceOperations] (on by default) consecutive changes to
+  /// the same entity are merged too: create + update becomes one create,
+  /// update + delete becomes one delete, and create + delete of an entity
+  /// the server never saw is dropped entirely.
   ///
-  /// This ensures that multiple updates to the same entity will overwrite
-  /// the same task, preventing data duplication.
+  /// [priority] controls send order across entities. [dependsOn] holds this
+  /// task back until the listed entities are fully synced, e.g. a comment
+  /// that depends on its post.
   ///
   /// If [dirtyTracker] is provided and has dirty state for this entity,
   /// only dirty fields will be synced (partial update).
@@ -138,56 +256,225 @@ class OfflineSyncManager {
     required String entityId,
     required SyncOperation operation,
     required Map<String, dynamic> payload,
+    SyncPriority priority = SyncPriority.normal,
+    List<EntityRef> dependsOn = const [],
   }) async {
+    _ensureNotDisposed();
+
     // Check for dirty state if dirty tracker is available
     DirtyState? dirtyState;
     Map<String, dynamic> finalPayload = payload;
 
-    if (_dirtyTracker != null) {
+    if (_dirtyTracker != null && operation != SyncOperation.delete) {
       dirtyState = await _dirtyTracker!.getDirtyState(entityType, entityId);
-      
+
       // If dirty state exists and has dirty fields, build partial payload
       if (dirtyState.hasDirtyFields) {
         finalPayload = DirtyPayloadBuilder.buildPartialPayload(
           fullPayload: payload,
           dirtyState: dirtyState,
         );
+      } else {
+        dirtyState = null;
       }
     }
 
-    final task = SyncTask(
+    final now = _nextEnqueueTime();
+    final incoming = SyncTask(
       entityType: entityType,
       entityId: entityId,
       operation: operation,
       payload: finalPayload,
       status: SyncStatus.pending,
       dirtyState: dirtyState,
+      createdAt: now,
+      updatedAt: now,
+      priority: priority,
+      dependsOn: dependsOn,
     );
 
-    // Save or overwrite the task (taskId is deterministic, so this is safe)
-    await _store.saveTask(task);
+    final plan = await _lock.run(() async {
+      final forEntity = (await _store.getAllTasks())
+          .where((t) => t.entityKey == incoming.entityKey && t.isOutstanding)
+          .toList();
+      final plan = QueueCompactor.plan(
+        existing: forEntity,
+        incoming: incoming,
+        coalesce: _config.coalesceOperations,
+      );
+      // Save before removing: a crash in between leaves both tasks, which is
+      // safe (they are sent in order), whereas the reverse could lose data.
+      if (plan.save != null) await _store.saveTask(plan.save!);
+      for (final id in plan.remove) {
+        await _store.deleteTask(id);
+      }
+      return plan;
+    });
 
-    // Emit debug event (safe, non-blocking)
+    if (plan.kind == CompactionKind.annihilated && _dirtyTracker != null) {
+      await _dirtyTracker!.clearAll(entityType: entityType, entityId: entityId);
+    }
+
+    final taskId = plan.save?.taskId ?? incoming.taskId;
+    switch (plan.kind) {
+      case CompactionKind.merged:
+        _safeEmitEvent(SyncEventType.taskCoalesced,
+            taskId: taskId,
+            entityType: entityType,
+            message: 'Change merged into queued task',
+            metadata: {'removed': plan.remove});
+        _safeUpdateMetrics(
+            () => _debugController?.metrics.incrementCoalesced());
+        break;
+      case CompactionKind.annihilated:
+        _safeEmitEvent(SyncEventType.taskAnnihilated,
+            taskId: taskId,
+            entityType: entityType,
+            message: 'Create and delete cancelled out; nothing to send',
+            metadata: {'removed': plan.remove});
+        _safeUpdateMetrics(
+            () => _debugController?.metrics.incrementCoalesced());
+        break;
+      case CompactionKind.appended:
+      case CompactionKind.replaced:
+        break;
+    }
+
     _safeEmitEvent(
       SyncEventType.enqueue,
-      taskId: task.taskId,
+      taskId: taskId,
       entityType: entityType,
       message: 'Task enqueued',
       metadata: {
-        'isPartialUpdate': task.isPartialUpdate,
-        'dirtyFieldCount': task.dirtyState?.dirtyFieldPaths.length ?? 0,
+        'compaction': plan.kind.name,
+        'isPartialUpdate': plan.save?.isPartialUpdate ?? false,
+        'dirtyFieldCount': plan.save?.dirtyState?.dirtyFieldPaths.length ?? 0,
       },
     );
-
-    // Update metrics (safe, non-blocking)
     _safeUpdateMetrics(() => _debugController?.metrics.incrementEnqueued());
+
+    await _refreshState();
+    _scheduleEnqueueSync();
   }
+
+  /// Returns a strictly increasing timestamp so enqueue order is preserved
+  /// even on platforms with coarse clocks.
+  DateTime _nextEnqueueTime() {
+    var now = _clock();
+    final last = _lastEnqueueAt;
+    if (last != null && !now.isAfter(last)) {
+      now = last.add(const Duration(microseconds: 1));
+    }
+    _lastEnqueueAt = now;
+    return now;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queue management
+  // ---------------------------------------------------------------------------
+
+  /// Moves dead-lettered tasks back into the queue with a fresh retry budget.
+  ///
+  /// Retries a single task when [taskId] is given, otherwise all of them.
+  /// Returns the number of tasks revived.
+  Future<int> retryDeadLetter([String? taskId]) async {
+    _ensureNotDisposed();
+    final revived = await _lock.run(() async {
+      final tasks = taskId == null
+          ? await _store.getAllTasks()
+          : [if (await _store.getTask(taskId) case final t?) t];
+      var count = 0;
+      for (final task in tasks) {
+        if (task.status != SyncStatus.deadLetter) continue;
+        await _store.saveTask(task.copyWith(
+          status: SyncStatus.pending,
+          retryCount: 0,
+          clearNextAttemptAt: true,
+          updatedAt: _clock(),
+        ));
+        count++;
+        _safeEmitEvent(SyncEventType.taskRevived,
+            taskId: task.taskId, entityType: task.entityType);
+      }
+      return count;
+    });
+    await _refreshState();
+    if (revived > 0) _scheduleSync();
+    return revived;
+  }
+
+  /// Removes a task from the queue without sending it.
+  ///
+  /// Tasks that are currently in flight cannot be discarded. Returns true if
+  /// a task was removed.
+  Future<bool> discardTask(String taskId) async {
+    _ensureNotDisposed();
+    final removed = await _lock.run(() async {
+      final task = await _store.getTask(taskId);
+      if (task == null || task.status == SyncStatus.syncing) return false;
+      await _store.deleteTask(taskId);
+      return true;
+    });
+    if (removed) await _refreshState();
+    return removed;
+  }
+
+  /// Removes every dead-lettered task. Returns the number removed.
+  Future<int> discardDeadLetters() async {
+    _ensureNotDisposed();
+    final removed = await _lock.run(() async {
+      var count = 0;
+      for (final task in await _store.getAllTasks()) {
+        if (task.status == SyncStatus.deadLetter) {
+          await _store.deleteTask(task.taskId);
+          count++;
+        }
+      }
+      return count;
+    });
+    if (removed > 0) await _refreshState();
+    return removed;
+  }
+
+  /// Pauses syncing. Manual and automatic syncs are skipped until [resume]
+  /// is called (a manual `sync(force: true)` still runs). Enqueueing keeps
+  /// working while paused.
+  void pause() {
+    if (_paused || _isDisposed) return;
+    _paused = true;
+    _retryTimer?.cancel();
+    _enqueueDebounceTimer?.cancel();
+    _safeEmitEvent(SyncEventType.paused, message: 'Sync paused');
+    if (!isSyncing) _setPhase(SyncPhase.paused);
+  }
+
+  /// Resumes syncing after [pause], and syncs right away if auto-sync is on.
+  void resume() {
+    if (!_paused || _isDisposed) return;
+    _paused = false;
+    _safeEmitEvent(SyncEventType.resumed, message: 'Sync resumed');
+    if (!isSyncing) _setPhase(SyncPhase.idle);
+    _scheduleSync();
+  }
+
+  /// Closes the circuit breaker, allowing syncs immediately.
+  void resetCircuitBreaker() {
+    _circuitBreaker?.reset();
+    if (_state.phase == SyncPhase.circuitOpen) _setPhase(SyncPhase.idle);
+    _scheduleSync();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Auto-sync
+  // ---------------------------------------------------------------------------
 
   /// Enables auto-sync triggers.
   ///
   /// When enabled, sync will automatically run when:
   /// - Network becomes available (if connectivityService is provided)
   /// - App resumes from background
+  /// - A failed task's backoff delay has elapsed
+  /// - After [SyncConfig.syncOnEnqueueDebounce], when set
   ///
   /// Auto-sync respects connectivity status and will not sync when offline.
   void enableAutoSync() {
@@ -199,8 +486,12 @@ class OfflineSyncManager {
     if (_connectivityService != null) {
       _connectivitySubscription = _connectivityService!.onStatusChange.listen(
         (isOnline) {
-          if (isOnline && !_isDisposed) {
+          if (_isDisposed) return;
+          if (isOnline) {
+            if (_state.phase == SyncPhase.offline) _setPhase(SyncPhase.idle);
             _scheduleSync();
+          } else if (!isSyncing && _state.phase == SyncPhase.idle) {
+            _setPhase(SyncPhase.offline);
           }
         },
       );
@@ -215,6 +506,9 @@ class OfflineSyncManager {
       },
     );
     _lifecycleObserver!.attach();
+
+    // Pick up anything that is already waiting.
+    _scheduleSync();
   }
 
   /// Disables auto-sync triggers.
@@ -228,280 +522,650 @@ class OfflineSyncManager {
     _lifecycleObserver = null;
     _retryTimer?.cancel();
     _retryTimer = null;
+    _enqueueDebounceTimer?.cancel();
+    _enqueueDebounceTimer = null;
   }
 
-  /// Syncs pending tasks to the server.
+  /// Schedules a sync attempt from an auto-sync trigger.
+  void _scheduleSync([Duration delay = Duration.zero]) {
+    if (_isDisposed || !_autoSyncEnabled || _paused) return;
+    if (isSyncing) {
+      _rerunRequested = true;
+      return;
+    }
+
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, () {
+      if (_isDisposed || _paused) return;
+      sync().catchError((Object _) {
+        // Auto-sync errors are swallowed; manual sync errors propagate.
+        return const SyncReport();
+      });
+    });
+  }
+
+  void _scheduleEnqueueSync() {
+    final debounce = _config.syncOnEnqueueDebounce;
+    if (debounce == null || !_autoSyncEnabled || _paused || _isDisposed) {
+      return;
+    }
+    _enqueueDebounceTimer?.cancel();
+    _enqueueDebounceTimer = Timer(debounce, () => _scheduleSync());
+  }
+
+  /// After a sync, schedules the next automatic attempt if there is work
+  /// waiting on a timer (backoff or circuit breaker cooldown).
+  void _scheduleFollowUp(SyncReport report) {
+    if (_isDisposed || !_autoSyncEnabled || _paused) return;
+
+    if (_rerunRequested) {
+      _rerunRequested = false;
+      _scheduleSync();
+      return;
+    }
+    if (report.skippedReason == SyncSkipReason.offline) return;
+
+    final now = _clock();
+    final openUntil = _circuitBreaker?.openUntil;
+    if (openUntil != null && openUntil.isAfter(now)) {
+      _scheduleSync(openUntil.difference(now));
+      return;
+    }
+
+    final tasks = _tasksSnapshot ?? const <SyncTask>[];
+    final readyNow = QueueScheduler.selectBatch(tasks,
+            now: now, limit: 1, canRetry: _retryPolicy.shouldRetry)
+        .isNotEmpty;
+    if (readyNow && report.batches >= _config.maxBatchesPerSync) {
+      _scheduleSync();
+      return;
+    }
+
+    final nextRetry = _state.nextRetryAt;
+    if (nextRetry != null) {
+      final delay =
+          nextRetry.isAfter(now) ? nextRetry.difference(now) : Duration.zero;
+      _scheduleSync(delay);
+      _safeEmitEvent(
+        SyncEventType.retryScheduled,
+        message: 'Retry scheduled after ${delay.inSeconds}s',
+        metadata: {'delayMs': delay.inMilliseconds},
+      );
+      _safeUpdateMetrics(() => _debugController?.metrics.incrementRetries());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sync
+  // ---------------------------------------------------------------------------
+
+  /// Syncs queued tasks to the server and returns a [SyncReport].
   ///
-  /// This method implements single-flight pattern to prevent parallel execution.
-  /// If a sync is already in progress, subsequent calls will wait for it to complete.
+  /// Single-flight: if a sync is already running, the call joins it.
   ///
-  /// Process:
-  /// 1. Check connectivity (if connectivityService is provided)
-  /// 2. Fetch pending tasks in batches
-  /// 3. Mark tasks as syncing BEFORE network call (crash-safe)
-  /// 4. Call adapter.syncBatch
-  /// 5. Mark successful taskIds as synced
-  /// 6. Mark failed taskIds with error and increment retryCount
+  /// The queue is drained batch by batch (up to
+  /// [SyncConfig.maxBatchesPerSync]) until it is empty or a batch has
+  /// retryable failures. Tasks are marked as syncing before the network call
+  /// (crash-safe) and are never removed without explicit server
+  /// acknowledgment.
   ///
-  /// Tasks are NEVER deleted without explicit server acknowledgment.
-  /// Retries do NOT create new tasks; they update existing ones.
-  ///
-  /// Will not sync if offline (when connectivityService is provided).
-  Future<void> sync() async {
+  /// Skipped (with [SyncReport.skippedReason]) when offline, paused or when
+  /// the circuit breaker is open. Pass [force] to ignore pause, the circuit
+  /// breaker and per-task backoff delays (connectivity is still checked).
+  Future<SyncReport> sync({bool force = false}) {
     if (_isDisposed) {
       throw StateError('OfflineSyncManager has been disposed');
     }
+    final running = _inFlight;
+    if (running != null) return running;
 
-    // Check connectivity if service is available
-    if (_connectivityService != null) {
-      final isOnline = await _connectivityService!.isOnline();
-      if (!isOnline) {
-        // Don't sync when offline
-        _safeEmitEvent(
-          SyncEventType.skippedOffline,
-          message: 'Sync skipped - device is offline',
-        );
-        return;
-      }
-    }
-
-    // Record sync start for metrics
-    _safeUpdateMetrics(() => _debugController?.recordSyncStart());
-
-    // Single-flight pattern: prevent parallel sync execution
-    if (_isSyncing) {
-      // Wait for the current sync to complete
-      if (_syncCompleter != null) {
-        return _syncCompleter!.future;
-      }
-    }
-
-    _isSyncing = true;
-    _syncCompleter = Completer<void>();
-
-    try {
-      await _performSync();
-      _syncCompleter!.complete();
-    } catch (e) {
-      _syncCompleter!.completeError(e);
-      rethrow;
-    } finally {
-      _isSyncing = false;
-      _syncCompleter = null;
-      
-      // Record sync completion for metrics (safe, non-blocking)
-      _safeUpdateMetrics(() {
-        // Note: hadFailures will be determined in _performSync
-        _debugController?.recordSyncComplete();
-      });
-    }
-  }
-
-  /// Schedules a sync attempt, respecting retry delays and preventing overlapping syncs.
-  ///
-  /// This is used internally by auto-sync triggers.
-  void _scheduleSync() {
-    if (_isDisposed || _isSyncing) return;
-
-    // Cancel any existing retry timer
     _retryTimer?.cancel();
-
-    // Schedule immediate sync (no delay for auto-triggers)
-    _retryTimer = Timer(Duration.zero, () {
-      if (!_isDisposed) {
-        sync().catchError((error) {
-          // Silently handle errors from auto-sync
-          // Manual sync errors are still propagated
-        });
-      }
+    final future = _runSync(force);
+    _inFlight = future;
+    return future.then((report) {
+      _inFlight = null;
+      _scheduleFollowUp(report);
+      return report;
+    }, onError: (Object error, StackTrace stack) {
+      _inFlight = null;
+      if (!_isDisposed) _setPhase(SyncPhase.idle);
+      _scheduleFollowUp(const SyncReport());
+      return Future<SyncReport>.error(error, stack);
     });
   }
 
-  /// Performs the actual sync operation.
-  Future<void> _performSync() async {
-    // Fetch pending tasks in batches
-    // Filter out tasks that have exceeded max retries
-    final allTasks = await _store.getPendingTasks(_config.batchSize * 2);
-    final tasks = allTasks.where((task) {
-      return _retryPolicy.shouldRetry(task.retryCount);
-    }).take(_config.batchSize).toList();
+  Future<SyncReport> _runSync(bool force) async {
+    final startedAt = _clock();
 
-    if (tasks.isEmpty) {
-      return;
+    if (_paused && !force) {
+      _setPhase(SyncPhase.paused);
+      return const SyncReport.skipped(SyncSkipReason.paused);
     }
 
-    // Check connectivity again right before sync (defensive)
-    if (_connectivityService != null) {
-      final isOnline = await _connectivityService!.isOnline();
-      if (!isOnline) {
-        // Network dropped, don't sync
-        return;
-      }
-    }
-
-    // Mark all tasks as syncing BEFORE network call (crash-safe)
-    // If the app crashes here, tasks will remain in syncing state
-    // and can be recovered on next sync attempt
-    for (final task in tasks) {
-      await _store.markSyncing(task.taskId);
-    }
-
-    // Call adapter to sync batch
-    SyncResult result;
-    bool hadFailures = false;
-    try {
-      result = await _adapter.syncBatch(tasks);
-      hadFailures = result.failedTaskErrors.isNotEmpty;
-    } catch (e) {
-      // Network error or adapter exception
-      // Mark all tasks as failed and schedule retry if needed
-      final errorMessage = e.toString();
-      for (final task in tasks) {
-        await _store.markFailed(task.taskId, errorMessage);
-        _safeEmitEvent(
-          SyncEventType.taskFailed,
-          taskId: task.taskId,
-          entityType: task.entityType,
-          message: 'Task failed: $errorMessage',
-          metadata: {'retryCount': task.retryCount},
-        );
-        _safeUpdateMetrics(() {
-          _debugController?.metrics.incrementFailed();
-        });
-      }
-      _scheduleRetryIfNeeded(tasks);
-      
-      // Record sync completion with failures
-      _safeUpdateMetrics(() {
-        _debugController?.recordSyncComplete(hadFailures: true);
-      });
-      return;
-    }
-
-    // Process successful taskIds
-    for (final taskId in result.successTaskIds) {
-      await _store.markSynced(taskId);
-      
-      final task = tasks.firstWhere(
-        (t) => t.taskId == taskId,
-        orElse: () => throw StateError('Task not found: $taskId'),
-      );
-      
-      // Emit success event
+    if (_connectivityService != null &&
+        !await _connectivityService!.isOnline()) {
       _safeEmitEvent(
-        SyncEventType.taskSucceeded,
-        taskId: taskId,
-        entityType: task.entityType,
-        message: 'Task synced successfully',
+        SyncEventType.skippedOffline,
+        message: 'Sync skipped - device is offline',
       );
-      _safeUpdateMetrics(() {
-        _debugController?.metrics.incrementSynced();
-      });
-      
-      // Clear dirty fields for successfully synced tasks
-      if (_dirtyTracker != null) {
-        if (task.dirtyState != null && task.dirtyState!.hasDirtyFields) {
-          // Clear all dirty fields that were synced
-          await _dirtyTracker!.clearSyncedFields(
-            entityType: task.entityType,
-            entityId: task.entityId,
-            syncedFieldPaths: task.dirtyState!.dirtyFieldPaths,
-          );
+      _setPhase(SyncPhase.offline);
+      return const SyncReport.skipped(SyncSkipReason.offline);
+    }
+
+    final breaker = _circuitBreaker;
+    if (breaker != null && !breaker.allowsRequest && !force) {
+      _setPhase(SyncPhase.circuitOpen);
+      return const SyncReport.skipped(SyncSkipReason.circuitOpen);
+    }
+
+    _safeUpdateMetrics(() => _debugController?.recordSyncStart());
+    _setPhase(SyncPhase.syncing);
+
+    final totals = _BatchOutcome();
+    var batches = 0;
+    try {
+      await _lock.run(_recoverInterruptedTasks);
+
+      while (batches < _config.maxBatchesPerSync && !_isDisposed) {
+        final batch = await _lock.run(() => _prepareBatch(force, totals));
+        await _refreshState();
+        if (batch.isEmpty) break;
+
+        batches++;
+        final outcome = await _sendBatch(batch);
+        totals.add(outcome);
+
+        if (outcome.retryableFailures > 0) break; // Don't hammer the server.
+        if (breaker != null && !breaker.allowsRequest) break;
+        if (_paused && !force) break;
+        if (_connectivityService != null &&
+            !await _connectivityService!.isOnline()) {
+          break;
         }
       }
+    } finally {
+      _safeUpdateMetrics(() => _debugController?.recordSyncComplete(
+          hadFailures: totals.retryableFailures + totals.deadLettered > 0));
     }
 
-    // Process failed taskIds with conflict detection and resolution
-    final failedTasks = <SyncTask>[];
-    for (final entry in result.failedTaskErrors.entries) {
-      final taskId = entry.key;
-      final error = entry.value;
+    final report = SyncReport(
+      batches: batches,
+      attempted: totals.attempted,
+      succeeded: totals.succeeded,
+      failed: totals.retryableFailures,
+      conflicts: totals.conflicts,
+      deadLettered: totals.deadLettered,
+      duration: _clock().difference(startedAt),
+    );
 
-      // Find the task
-      final task = tasks.firstWhere(
-        (t) => t.taskId == taskId,
-        orElse: () => throw StateError('Task not found: $taskId'),
-      );
+    if (!_isDisposed) {
+      final phase = breaker != null && !breaker.allowsRequest
+          ? SyncPhase.circuitOpen
+          : (_paused ? SyncPhase.paused : SyncPhase.idle);
+      _publish(_state.copyWith(
+          phase: phase, lastSyncAt: _clock(), lastReport: report));
+      await _refreshState();
+    }
+    return report;
+  }
 
-      // Get server data if available (for conflict detection)
-      final serverData = result.serverData?[taskId];
-
-      // Detect conflict
-      final conflictResult = _conflictDetector.detect(
-        localTask: task,
-        serverResponse: serverData,
-        errorMessage: error,
-      );
-
-      if (conflictResult.hasConflict && conflictResult.serverData != null) {
-        // Conflict detected - resolve it
-        _safeEmitEvent(
-          SyncEventType.conflictDetected,
-          taskId: taskId,
-          entityType: task.entityType,
-          message: 'Conflict detected',
-          metadata: conflictResult.metadata,
-        );
-        _safeUpdateMetrics(() {
-          _debugController?.metrics.incrementConflictsDetected();
-        });
-        
-        await _handleConflict(task, conflictResult.serverData!, error);
-        
-        _safeEmitEvent(
-          SyncEventType.conflictResolved,
-          taskId: taskId,
-          entityType: task.entityType,
-          message: 'Conflict resolved',
-        );
-        _safeUpdateMetrics(() {
-          _debugController?.metrics.incrementConflictsResolved();
-        });
-      } else {
-        // No conflict - regular failure
-        await _store.markFailed(taskId, error);
-        _safeEmitEvent(
-          SyncEventType.taskFailed,
-          taskId: taskId,
-          entityType: task.entityType,
-          message: 'Task failed: $error',
-          metadata: {'retryCount': task.retryCount},
-        );
-        _safeUpdateMetrics(() {
-          _debugController?.metrics.incrementFailed();
-        });
-        failedTasks.add(task);
+  /// Resets tasks left in `syncing` by a crash or kill back to pending.
+  /// Only called while no batch of ours is in flight.
+  Future<void> _recoverInterruptedTasks() async {
+    for (final task in await _store.getAllTasks()) {
+      if (task.status == SyncStatus.syncing) {
+        await _store.saveTask(task.copyWith(status: SyncStatus.pending));
       }
     }
+  }
 
-    // Handle tasks that were sent but not acknowledged by server
-    // This should not happen if adapter is implemented correctly,
-    // but we handle it defensively
-    final acknowledgedTaskIds = {
-      ...result.successTaskIds,
-      ...result.failedTaskErrors.keys,
-    };
+  /// Housekeeping plus selecting and claiming the next batch.
+  Future<List<SyncTask>> _prepareBatch(bool force, _BatchOutcome totals) async {
+    final now = _clock();
+    final all = await _store.getAllTasks();
+    final live = <SyncTask>[];
+    final ttl = _config.taskTimeToLive;
 
-    for (final task in tasks) {
-      if (!acknowledgedTaskIds.contains(task.taskId)) {
-        // Task was sent but not acknowledged - mark as failed
-        await _store.markFailed(
-          task.taskId,
-          'Task not acknowledged by server',
-        );
-        failedTasks.add(task);
+    for (final task in all) {
+      if (task.status == SyncStatus.synced) {
+        // Purge synced tasks past their retention window.
+        if (!now.isBefore(task.updatedAt.add(_config.syncedTaskRetention))) {
+          await _store.deleteTask(task.taskId);
+          continue;
+        }
+      } else if (task.status == SyncStatus.pending ||
+          task.status == SyncStatus.failed) {
+        String? reason;
+        if (ttl != null && now.difference(task.createdAt) > ttl) {
+          reason = 'Expired: not synced within ${ttl.inSeconds}s';
+        } else if (!_retryPolicy.shouldRetry(task.retryCount)) {
+          // Legacy records that ran out of retries before dead-lettering existed.
+          reason = task.lastError ?? 'Retries exhausted';
+        }
+        if (reason != null) {
+          final parked = task.copyWith(
+              status: SyncStatus.deadLetter,
+              lastError: reason,
+              updatedAt: now,
+              clearNextAttemptAt: true);
+          await _store.saveTask(parked);
+          _onDeadLettered(parked, reason);
+          totals.deadLettered++;
+          live.add(parked);
+          continue;
+        }
       }
+      live.add(task);
     }
 
-    // Schedule retry for failed tasks if needed
-    if (failedTasks.isNotEmpty) {
-      _scheduleRetryIfNeeded(failedTasks);
+    final selected = QueueScheduler.selectBatch(
+      live,
+      now: now,
+      limit: _config.batchSize,
+      canRetry: _retryPolicy.shouldRetry,
+      ignoreBackoff: force,
+    );
+
+    // Mark all tasks as syncing BEFORE the network call (crash-safe).
+    final claimed = <SyncTask>[];
+    for (final task in selected) {
+      final inFlight =
+          task.copyWith(status: SyncStatus.syncing, updatedAt: now);
+      await _store.saveTask(inFlight);
+      claimed.add(inFlight);
     }
-    
-    // Record sync completion
-    _safeUpdateMetrics(() {
-      _debugController?.recordSyncComplete(hadFailures: hadFailures);
+    return claimed;
+  }
+
+  /// Sends one batch and records the results.
+  Future<_BatchOutcome> _sendBatch(List<SyncTask> batch) async {
+    final outcome = _BatchOutcome()..attempted = batch.length;
+    final byId = {for (final t in batch) t.taskId: t};
+
+    SyncResult result;
+    try {
+      result = await _adapter.syncBatch(batch);
+    } catch (e) {
+      // Network error or adapter exception: the whole batch failed.
+      final permanent = e is AdapterError && !e.retryable;
+      await _lock.run(() async {
+        for (final task in batch) {
+          outcome.add(
+              await _recordFailure(task, e.toString(), permanent: permanent));
+        }
+      });
+      _recordBreaker(outcome);
+      return outcome;
+    }
+
+    await _lock.run(() async {
+      for (final taskId in result.successTaskIds) {
+        final sent = byId[taskId];
+        if (sent == null) continue; // Unknown id from the server.
+        outcome.add(await _recordSuccess(sent));
+      }
+
+      for (final entry in result.failedTaskErrors.entries) {
+        final sent = byId[entry.key];
+        if (sent == null || result.successTaskIds.contains(entry.key)) {
+          continue;
+        }
+        final error = entry.value;
+
+        final conflict = _conflictDetector.detect(
+          localTask: sent,
+          serverResponse: result.serverData?[entry.key],
+          errorMessage: error,
+        );
+
+        if (conflict.hasConflict && conflict.serverData != null) {
+          outcome.conflicts++;
+          _safeEmitEvent(SyncEventType.conflictDetected,
+              taskId: sent.taskId,
+              entityType: sent.entityType,
+              message: 'Conflict detected',
+              metadata: conflict.metadata);
+          _safeUpdateMetrics(
+              () => _debugController?.metrics.incrementConflictsDetected());
+          outcome.add(await _handleConflict(sent, conflict.serverData!, error));
+        } else {
+          outcome.add(await _recordFailure(sent, error,
+              permanent: result.permanentFailureTaskIds.contains(entry.key)));
+        }
+      }
+
+      // Tasks the adapter didn't report on are treated as failed.
+      final acknowledged = {
+        ...result.successTaskIds,
+        ...result.failedTaskErrors.keys,
+      };
+      for (final task in batch) {
+        if (!acknowledged.contains(task.taskId)) {
+          outcome.add(await _recordFailure(
+              task, 'Task not acknowledged by server',
+              permanent: false));
+        }
+      }
     });
+
+    _recordBreaker(outcome);
+    return outcome;
+  }
+
+  void _recordBreaker(_BatchOutcome outcome) {
+    final breaker = _circuitBreaker;
+    if (breaker == null) return;
+    if (outcome.succeeded > 0 || outcome.conflicts > 0) {
+      if (breaker.recordSuccess()) {
+        _safeEmitEvent(SyncEventType.circuitClosed,
+            message: 'Circuit breaker closed');
+      }
+    } else if (outcome.retryableFailures > 0) {
+      if (breaker.recordFailure()) {
+        _safeEmitEvent(SyncEventType.circuitOpened,
+            message: 'Circuit breaker opened',
+            metadata: {'openUntil': breaker.openUntil?.toIso8601String()});
+      }
+    }
+  }
+
+  /// Handles a server acknowledgment for [sent].
+  Future<_TaskOutcome> _recordSuccess(SyncTask sent) async {
+    final current = await _store.getTask(sent.taskId);
+    if (current == null) return _TaskOutcome.none;
+
+    if (current.revision != sent.revision) {
+      // Edited while in flight: the server has the old content, so keep the
+      // newer content queued instead of marking it synced.
+      await _store.saveTask(current.copyWith(
+        status: SyncStatus.pending,
+        retryCount: 0,
+        clearNextAttemptAt: true,
+        clearLastError: true,
+      ));
+      return _TaskOutcome.succeeded;
+    }
+
+    await _completeTask(current);
+
+    _safeEmitEvent(SyncEventType.taskSucceeded,
+        taskId: sent.taskId,
+        entityType: sent.entityType,
+        message: 'Task synced successfully');
+    _safeUpdateMetrics(() => _debugController?.metrics.incrementSynced());
+
+    // Clear dirty fields that were synced.
+    final dirty = sent.dirtyState;
+    if (_dirtyTracker != null && dirty != null && dirty.hasDirtyFields) {
+      await _dirtyTracker!.clearSyncedFields(
+        entityType: sent.entityType,
+        entityId: sent.entityId,
+        syncedFieldPaths: dirty.dirtyFieldPaths,
+      );
+    }
+    return _TaskOutcome.succeeded;
+  }
+
+  /// Removes a confirmed task, or keeps it as synced during retention.
+  Future<void> _completeTask(SyncTask task) async {
+    if (_config.syncedTaskRetention == Duration.zero) {
+      await _store.deleteTask(task.taskId);
+    } else {
+      await _store.saveTask(task.copyWith(
+        status: SyncStatus.synced,
+        updatedAt: _clock(),
+        clearNextAttemptAt: true,
+        clearLastError: true,
+      ));
+    }
+  }
+
+  /// Records a failure for [sent]: schedules a retry with backoff, or moves
+  /// the task to the dead-letter queue.
+  Future<_TaskOutcome> _recordFailure(
+    SyncTask sent,
+    String error, {
+    required bool permanent,
+  }) async {
+    final current = await _store.getTask(sent.taskId);
+    if (current == null) return _TaskOutcome.none;
+    final now = _clock();
+
+    if (current.revision != sent.revision) {
+      // Edited while in flight; the failure was for older content.
+      await _store.saveTask(current.copyWith(
+          status: SyncStatus.pending, lastError: error, updatedAt: now));
+      return _TaskOutcome.retryableFailure;
+    }
+
+    final failures = current.retryCount + 1;
+    if (permanent || !_retryPolicy.shouldRetry(failures)) {
+      final parked = current.copyWith(
+        status: SyncStatus.deadLetter,
+        retryCount: failures,
+        lastError: error,
+        updatedAt: now,
+        clearNextAttemptAt: true,
+      );
+      await _store.saveTask(parked);
+      _onDeadLettered(parked, error);
+      return _TaskOutcome.deadLettered;
+    }
+
+    await _store.saveTask(current.copyWith(
+      status: SyncStatus.failed,
+      retryCount: failures,
+      lastError: error,
+      updatedAt: now,
+      nextAttemptAt: now.add(_retryPolicy.backoffFor(failures)),
+    ));
+    _safeEmitEvent(SyncEventType.taskFailed,
+        taskId: sent.taskId,
+        entityType: sent.entityType,
+        message: 'Task failed: $error',
+        metadata: {'retryCount': failures});
+    _safeUpdateMetrics(() => _debugController?.metrics.incrementFailed());
+    return _TaskOutcome.retryableFailure;
+  }
+
+  void _onDeadLettered(SyncTask task, String reason) {
+    _safeEmitEvent(SyncEventType.taskDeadLettered,
+        taskId: task.taskId,
+        entityType: task.entityType,
+        message: 'Task moved to dead-letter queue: $reason',
+        metadata: {'retryCount': task.retryCount});
+    _safeUpdateMetrics(() => _debugController?.metrics.incrementDeadLettered());
+  }
+
+  /// Handles a conflict by resolving it and applying the resolution result.
+  ///
+  /// Every conflict counts against the retry budget, so a resolver that
+  /// keeps producing conflicting payloads cannot loop forever: once retries
+  /// are exhausted the task is dead-lettered. Never creates a new task and
+  /// never changes the taskId.
+  Future<_TaskOutcome> _handleConflict(
+    SyncTask sent,
+    Map<String, dynamic> serverData,
+    String originalError,
+  ) async {
+    final current = await _store.getTask(sent.taskId);
+    if (current == null) return _TaskOutcome.none;
+    final now = _clock();
+
+    if (current.revision != sent.revision) {
+      // The user edited the entity while it was in flight. Resend the newer
+      // content rather than resolving against stale data.
+      await _store.saveTask(current.copyWith(
+          status: SyncStatus.pending, lastError: originalError));
+      return _TaskOutcome.conflictRequeued;
+    }
+
+    final failures = current.retryCount + 1;
+    Future<_TaskOutcome> park(String reason) async {
+      final parked = current.copyWith(
+        status: SyncStatus.deadLetter,
+        retryCount: failures,
+        lastError: reason,
+        updatedAt: now,
+        clearNextAttemptAt: true,
+      );
+      await _store.saveTask(parked);
+      _onDeadLettered(parked, reason);
+      return _TaskOutcome.deadLettered;
+    }
+
+    if (!_retryPolicy.shouldRetry(failures)) {
+      return park('Conflict unresolved after $failures attempts: '
+          '$originalError');
+    }
+
+    final ResolutionResult resolution;
+    try {
+      resolution =
+          _conflictResolver.resolve(localTask: current, serverData: serverData);
+    } catch (e) {
+      return park('Conflict resolution failed: $e');
+    }
+
+    if (resolution.shouldAbort) {
+      return park(resolution.errorMessage ?? 'Conflict resolution aborted');
+    }
+
+    _safeEmitEvent(SyncEventType.conflictResolved,
+        taskId: sent.taskId,
+        entityType: sent.entityType,
+        message: 'Conflict resolved',
+        metadata: {'source': resolution.resolutionSource.name});
+    _safeUpdateMetrics(
+        () => _debugController?.metrics.incrementConflictsResolved());
+
+    if (resolution.shouldRetry) {
+      var resolvedPayload = resolution.resolvedPayload;
+      final dirty = current.dirtyState;
+      if (dirty != null &&
+          dirty.hasDirtyFields &&
+          resolution.resolutionSource == ResolutionSource.merged) {
+        // Field-level merge: dirty client fields over clean server fields.
+        resolvedPayload = DirtyPayloadBuilder.mergePartialIntoFull(
+          fullPayload: serverData,
+          partialPayload: current.payload,
+          dirtyState: dirty,
+        );
+      }
+      await _store.saveTask(current.copyWith(
+        payload: resolvedPayload,
+        status: SyncStatus.pending,
+        retryCount: failures,
+        lastError: originalError,
+        updatedAt: now,
+        revision: current.revision + 1,
+        clearNextAttemptAt: true,
+      ));
+      return _TaskOutcome.conflictRequeued;
+    }
+
+    // Resolution accepts server data: the server is the source of truth.
+    if (_dirtyTracker != null && current.dirtyState != null) {
+      await _dirtyTracker!
+          .clearAll(entityType: current.entityType, entityId: current.entityId);
+    }
+    await _completeTask(current);
+    return _TaskOutcome.succeeded;
+  }
+
+  // ---------------------------------------------------------------------------
+  // State plumbing
+  // ---------------------------------------------------------------------------
+
+  Future<List<SyncTask>> _ensureSnapshot() async {
+    final snapshot = _tasksSnapshot;
+    if (snapshot != null) return snapshot;
+    await _refreshState();
+    return _tasksSnapshot ?? const [];
+  }
+
+  /// Reloads tasks from the store and publishes state if it changed.
+  Future<void> _refreshState() async {
+    if (_isDisposed) return;
+    final List<SyncTask> tasks;
+    try {
+      tasks = await _store.getAllTasks();
+    } catch (_) {
+      return; // State is best-effort; never break sync over it.
+    }
+    if (_isDisposed) return;
+
+    var pending = 0, syncing = 0, failed = 0, dead = 0;
+    DateTime? nextRetry;
+    for (final t in tasks) {
+      switch (t.status) {
+        case SyncStatus.pending:
+          pending++;
+          break;
+        case SyncStatus.syncing:
+          syncing++;
+          break;
+        case SyncStatus.failed:
+          failed++;
+          final at = t.nextAttemptAt;
+          if (at != null && (nextRetry == null || at.isBefore(nextRetry))) {
+            nextRetry = at;
+          }
+          break;
+        case SyncStatus.deadLetter:
+          dead++;
+          break;
+        case SyncStatus.synced:
+          break;
+      }
+    }
+
+    _tasksSnapshot = List.unmodifiable(tasks);
+    _tasksController.add(_tasksSnapshot!);
+    _publish(_state.copyWith(
+      pendingCount: pending,
+      syncingCount: syncing,
+      failedCount: failed,
+      deadLetterCount: dead,
+      nextRetryAt: nextRetry,
+      clearNextRetryAt: nextRetry == null,
+    ));
+  }
+
+  void _setPhase(SyncPhase phase) => _publish(_state.copyWith(phase: phase));
+
+  void _publish(SyncState next) {
+    if (_isDisposed || next == _state) return;
+    _state = next;
+    _stateController.add(next);
+  }
+
+  /// A stream that emits [initial] on listen, then forwards [source].
+  Stream<T> _replaying<T>({
+    required Stream<T> source,
+    required Future<T> Function() initial,
+  }) {
+    late final StreamController<T> controller;
+    StreamSubscription<T>? sub;
+    var gotLiveUpdate = false;
+    controller = StreamController<T>(
+      onListen: () async {
+        sub = source.listen((value) {
+          gotLiveUpdate = true;
+          controller.add(value);
+        }, onDone: controller.close);
+        final value = await initial();
+        if (!gotLiveUpdate && !controller.isClosed) controller.add(value);
+      },
+      onCancel: () => sub?.cancel(),
+    );
+    return controller.stream;
+  }
+
+  void _ensureNotDisposed() {
+    if (_isDisposed) {
+      throw StateError('OfflineSyncManager has been disposed');
+    }
   }
 
   /// Safely emits a debug event (non-blocking, never throws).
@@ -513,7 +1177,7 @@ class OfflineSyncManager {
     Map<String, Object?>? metadata,
   }) {
     if (_debugController == null) return;
-    
+
     try {
       _debugController!.emitEventNow(
         type: type,
@@ -530,163 +1194,12 @@ class OfflineSyncManager {
   /// Safely updates metrics (non-blocking, never throws).
   void _safeUpdateMetrics(void Function() update) {
     if (_debugController == null) return;
-    
+
     try {
       update();
     } catch (e) {
       // Never throw from debug code - fail silently
     }
-  }
-
-  /// Handles a conflict by resolving it and applying the resolution result.
-  ///
-  /// This method:
-  /// - Resolves the conflict using the configured resolver
-  /// - Updates the task payload if retry is needed (NEVER changes taskId)
-  /// - Marks task as synced if resolution accepts server data
-  /// - Marks task as failed if resolution aborts
-  ///
-  /// CRITICAL: Never creates a new task, never changes taskId, never infinite loops.
-  ///
-  /// To prevent infinite conflict loops:
-  /// - If retry count is already high, we abort to prevent endless retries
-  /// - Retry policy will eventually stop retries when maxRetries is reached
-  Future<void> _handleConflict(
-    SyncTask task,
-    Map<String, dynamic> serverData,
-    String originalError,
-  ) async {
-    // Safety check: if retries are exhausted, abort conflict resolution
-    // This prevents infinite loops where conflict resolution keeps retrying
-    if (!_retryPolicy.shouldRetry(task.retryCount)) {
-      await _store.markFailed(
-        task.taskId,
-        'Conflict detected but retries exhausted: $originalError',
-      );
-      return;
-    }
-
-    try {
-      // Resolve conflict
-      final resolution = _conflictResolver.resolve(
-        localTask: task,
-        serverData: serverData,
-      );
-
-      if (resolution.shouldAbort) {
-        // Resolution failed - mark as failed (non-retryable)
-        await _store.markFailed(
-          task.taskId,
-          resolution.errorMessage ?? 'Conflict resolution aborted',
-        );
-        return;
-      }
-
-      if (resolution.shouldRetry) {
-        // Update task payload with resolved data and mark as pending for retry
-        // CRITICAL: We update the payload but NEVER change taskId
-        // Note: We preserve retryCount - it will increment on next failure if it fails again
-        // This ensures retry policy eventually stops infinite conflict loops
-        
-        // For field-level conflict resolution, merge dirty fields with server data
-        Map<String, dynamic> resolvedPayload = resolution.resolvedPayload;
-        DirtyState? resolvedDirtyState = task.dirtyState;
-        
-        if (task.dirtyState != null && 
-            task.dirtyState!.hasDirtyFields &&
-            resolution.resolutionSource == ResolutionSource.merged) {
-          // Field-level merge: merge dirty client fields with clean server fields
-          resolvedPayload = DirtyPayloadBuilder.mergePartialIntoFull(
-            fullPayload: serverData,
-            partialPayload: task.payload,
-            dirtyState: task.dirtyState!,
-          );
-          // Keep the same dirty state for retry
-          resolvedDirtyState = task.dirtyState;
-        }
-        
-        final updatedTask = SyncTask(
-          entityType: task.entityType,
-          entityId: task.entityId,
-          operation: task.operation,
-          payload: resolvedPayload,
-          status: SyncStatus.pending,
-          retryCount: task.retryCount, // Preserve current count
-          createdAt: task.createdAt,
-          updatedAt: DateTime.now(),
-          dirtyState: resolvedDirtyState,
-        );
-        await _store.saveTask(updatedTask);
-        // Task will be retried in next sync cycle
-        // If it conflicts again and retryCount exceeds maxRetries, it will be aborted
-      } else {
-        // Resolution accepts server data - mark as synced
-        // Clear dirty fields since server data is now the source of truth
-        if (_dirtyTracker != null && task.dirtyState != null) {
-          if (task.dirtyState!.hasDirtyFields) {
-            // Clear all dirty fields since we're accepting server data
-            await _dirtyTracker!.clearAll(
-              entityType: task.entityType,
-              entityId: task.entityId,
-            );
-          }
-        }
-        await _store.markSynced(task.taskId);
-      }
-    } catch (e) {
-      // Resolution threw an error - mark as failed
-      await _store.markFailed(
-        task.taskId,
-        'Conflict resolution failed: ${e.toString()}',
-      );
-    }
-  }
-
-  /// Schedules a retry attempt for failed tasks using exponential backoff.
-  ///
-  /// Only schedules if:
-  /// - Auto-sync is enabled
-  /// - Tasks haven't exceeded max retries
-  /// - Not already syncing
-  void _scheduleRetryIfNeeded(List<SyncTask> failedTasks) {
-    if (!_autoSyncEnabled || _isDisposed || _isSyncing) return;
-
-    // Find the task with the highest retry count to determine delay
-    if (failedTasks.isEmpty) return;
-
-    // Note: task.retryCount is the count BEFORE markFailed was called.
-    // After markFailed, the retryCount in store is incremented by 1.
-    // So we use retryCount + 1 to get the current retry count.
-    final maxRetryCount = failedTasks
-        .map((t) => t.retryCount + 1)
-        .reduce((a, b) => a > b ? a : b);
-
-    final delay = _retryPolicy.nextDelay(maxRetryCount);
-    if (delay == null) {
-      // Retries exhausted, don't schedule
-      return;
-    }
-
-    // Cancel any existing retry timer
-    _retryTimer?.cancel();
-
-    // Schedule retry with backoff delay
-    _retryTimer = Timer(delay, () {
-      if (!_isDisposed && !_isSyncing) {
-        _safeEmitEvent(
-          SyncEventType.retryScheduled,
-          message: 'Retry scheduled after ${delay.inSeconds}s',
-          metadata: {'retryCount': maxRetryCount, 'delaySeconds': delay.inSeconds},
-        );
-        _safeUpdateMetrics(() {
-          _debugController?.metrics.incrementRetries();
-        });
-        
-        sync().catchError((error) {
-          // Silently handle errors from auto-retry
-        });
-      }
-    });
   }
 
   /// Executes sync in a background context.
@@ -712,10 +1225,9 @@ class OfflineSyncManager {
         SyncEventType.backgroundSyncTriggered,
         message: 'Background sync triggered',
       );
-      
-      // Use existing sync() method which handles all the logic
-      await sync();
-      return true;
+
+      final report = await sync();
+      return !report.wasSkipped;
     } catch (e) {
       // Fail silently - background sync is best-effort
       return false;
@@ -730,7 +1242,7 @@ class OfflineSyncManager {
     if (_debugController == null) {
       return null;
     }
-    
+
     try {
       return await _debugController!.getCurrentSnapshot();
     } catch (e) {
@@ -744,12 +1256,67 @@ class OfflineSyncManager {
   /// Should be called when the manager is no longer needed to prevent memory leaks.
   void dispose() {
     if (_isDisposed) return;
-    _isDisposed = true;
 
     disableAutoSync();
+    _isDisposed = true;
     _connectivityService?.dispose();
     _retryTimer?.cancel();
     _retryTimer = null;
+    _stateController.close();
+    _tasksController.close();
   }
 }
 
+/// Outcome of a single task within a batch.
+enum _TaskOutcome {
+  none,
+  succeeded,
+  retryableFailure,
+  deadLettered,
+  conflictRequeued,
+}
+
+/// Running totals for a batch or a whole sync.
+class _BatchOutcome {
+  int attempted = 0;
+  int succeeded = 0;
+  int retryableFailures = 0;
+  int deadLettered = 0;
+  int conflicts = 0;
+
+  void add(Object other) {
+    if (other is _BatchOutcome) {
+      attempted += other.attempted;
+      succeeded += other.succeeded;
+      retryableFailures += other.retryableFailures;
+      deadLettered += other.deadLettered;
+      conflicts += other.conflicts;
+      return;
+    }
+    switch (other as _TaskOutcome) {
+      case _TaskOutcome.succeeded:
+        succeeded++;
+        break;
+      case _TaskOutcome.retryableFailure:
+        retryableFailures++;
+        break;
+      case _TaskOutcome.deadLettered:
+        deadLettered++;
+        break;
+      case _TaskOutcome.conflictRequeued:
+      case _TaskOutcome.none:
+        break;
+    }
+  }
+}
+
+/// Minimal async mutex: runs actions one at a time, in call order.
+class _AsyncLock {
+  Future<void> _tail = Future<void>.value();
+
+  Future<T> run<T>(Future<T> Function() action) {
+    final result = _tail.then((_) => action());
+    _tail = result.then((_) {}, onError: (Object _) {});
+    return result;
+  }
+}

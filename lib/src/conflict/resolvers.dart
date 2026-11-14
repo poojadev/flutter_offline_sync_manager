@@ -159,4 +159,3 @@ class FieldLevelMergeResolver implements ConflictResolver {
     return metadataFields.contains(key) || key.startsWith('_');
   }
 }
-

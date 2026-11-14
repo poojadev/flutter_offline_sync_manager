@@ -18,4 +18,3 @@ abstract class SyncAdapter {
   /// appropriate error information in the result.
   Future<SyncResult> syncBatch(List<SyncTask> tasks);
 }
-

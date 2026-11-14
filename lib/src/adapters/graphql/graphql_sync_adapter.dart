@@ -237,10 +237,11 @@ class GraphQLSyncAdapter implements SyncAdapter {
     if (data['syncTask'] is Map) {
       final syncTask = data['syncTask'] as Map;
       if (syncTask['conflictData'] is Map) {
-        return {taskId: Map<String, dynamic>.from(syncTask['conflictData'] as Map)};
+        return {
+          taskId: Map<String, dynamic>.from(syncTask['conflictData'] as Map)
+        };
       }
     }
     return {};
   }
 }
-

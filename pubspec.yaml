@@ -1,6 +1,6 @@
 name: flutter_offline_sync_manager
 description: A production-grade Flutter package for managing offline sync operations with crash-safety, restart-safety, and duplication-safety. Works with any backend (REST, Firebase, GraphQL).
-version: 0.1.2
+version: 0.2.0
 homepage: https://github.com/poojadev/flutter_offline_sync_manager
 repository: https://github.com/poojadev/flutter_offline_sync_manager
 issue_tracker: https://github.com/poojadev/flutter_offline_sync_manager/issues
@@ -21,13 +21,13 @@ dependencies:
     sdk: flutter
   hive: ^2.2.3
   hive_flutter: ^1.1.0
-  connectivity_plus: ^6.0.0
-  workmanager: ^0.5.2
+  connectivity_plus: ">=6.0.0 <8.0.0"
+  workmanager: ^0.10.0
   background_fetch: ^1.5.0
   path_provider: ^2.1.1
   # Backend adapter dependencies with wide version constraints
-  # Supports cloud_firestore 4.x and 5.x to avoid conflicts with consuming apps
-  cloud_firestore: ">=4.0.0 <6.0.0"
+  # Supports cloud_firestore 4.x through 7.x to avoid conflicts with consuming apps
+  cloud_firestore: ">=4.0.0 <8.0.0"
   # Supports http 0.13.x and 1.x for REST and GraphQL adapters
   http: ">=0.13.0 <2.0.0"
 

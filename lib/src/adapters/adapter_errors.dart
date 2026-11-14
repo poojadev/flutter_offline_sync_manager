@@ -93,4 +93,3 @@ class UnknownAdapterError extends AdapterError {
     this.originalError,
   });
 }
-

@@ -75,4 +75,3 @@ class SyncEvent {
     return buffer.toString();
   }
 }
-

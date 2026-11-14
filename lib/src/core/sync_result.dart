@@ -15,11 +15,19 @@ class SyncResult {
   /// Keys are taskIds, values are the server response payloads.
   final Map<String, Map<String, dynamic>>? serverData;
 
+  /// TaskIds (a subset of [failedTaskErrors]) that failed permanently and
+  /// must not be retried, e.g. validation errors or HTTP 4xx responses.
+  ///
+  /// These tasks go straight to [SyncStatus.deadLetter] instead of burning
+  /// through the retry budget.
+  final Set<String> permanentFailureTaskIds;
+
   /// Creates a [SyncResult] with the given success and failure information.
   const SyncResult({
     required this.successTaskIds,
     required this.failedTaskErrors,
     this.serverData,
+    this.permanentFailureTaskIds = const {},
   });
 
   /// Creates a [SyncResult] where all tasks succeeded.
@@ -31,14 +39,18 @@ class SyncResult {
   }
 
   /// Creates a [SyncResult] where all tasks failed.
+  ///
+  /// Set [permanent] to mark every failure as non-retryable.
   factory SyncResult.allFailed(
     Map<String, String> errors, {
     Map<String, Map<String, dynamic>>? serverData,
+    bool permanent = false,
   }) {
     return SyncResult(
       successTaskIds: {},
       failedTaskErrors: errors,
       serverData: serverData,
+      permanentFailureTaskIds: permanent ? errors.keys.toSet() : const {},
     );
   }
 
@@ -52,4 +64,3 @@ class SyncResult {
   bool get isPartialSuccess =>
       successTaskIds.isNotEmpty && failedTaskErrors.isNotEmpty;
 }
-

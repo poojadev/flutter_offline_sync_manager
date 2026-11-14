@@ -24,4 +24,3 @@ abstract class ConflictResolver {
     required Map<String, dynamic> serverData,
   });
 }
-

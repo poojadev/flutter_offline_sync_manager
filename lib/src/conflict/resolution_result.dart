@@ -72,4 +72,3 @@ enum ResolutionSource {
   /// Resolution merged data from both sources.
   merged,
 }
-

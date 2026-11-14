@@ -139,14 +139,15 @@ class SyncDebugController {
   /// This is a read-only operation that does not affect sync behavior.
   Future<SyncDebugSnapshot> getCurrentSnapshot() async {
     try {
-      // Get all tasks (with a reasonable limit for snapshot)
-      final allTasks = await _store.getPendingTasks(1000);
-      
+      // Read every task. This is read-only: it never changes task state.
+      final allTasks = await _store.getAllTasks();
+
       // Count tasks by status
       int pendingCount = 0;
       int syncingCount = 0;
       int failedCount = 0;
       int syncedCount = 0;
+      int deadLetterCount = 0;
 
       for (final task in allTasks) {
         switch (task.status) {
@@ -161,6 +162,9 @@ class SyncDebugController {
             break;
           case SyncStatus.synced:
             syncedCount++;
+            break;
+          case SyncStatus.deadLetter:
+            deadLetterCount++;
             break;
         }
       }
@@ -181,6 +185,7 @@ class SyncDebugController {
         syncingTasks: syncingCount,
         failedTasks: failedCount,
         syncedTasks: syncedCount,
+        deadLetterTasks: deadLetterCount,
         lastSyncTime: _lastSyncTime,
         isSyncing: syncingCount > 0,
         isOnline: isOnline,
@@ -202,4 +207,3 @@ class SyncDebugController {
     _eventController.close();
   }
 }
-

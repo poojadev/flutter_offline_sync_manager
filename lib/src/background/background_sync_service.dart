@@ -61,10 +61,9 @@ class BackgroundSyncService {
       }
 
       // Create store (default to HiveSyncStore if not provided)
-      final store = storeFactory != null
-          ? await storeFactory()
-          : HiveSyncStore();
-      
+      final store =
+          storeFactory != null ? await storeFactory() : HiveSyncStore();
+
       // Initialize store (HiveSyncStore has initialize method)
       if (store is HiveSyncStore) {
         await store.initialize();
@@ -111,4 +110,3 @@ class BackgroundSyncService {
 /// This is used by platform-specific implementations to invoke
 /// background sync in a type-safe way.
 typedef BackgroundSyncCallback = Future<bool> Function();
-

@@ -23,4 +23,3 @@ enum ConflictStrategy {
   /// Allows for application-specific conflict resolution logic.
   custom,
 }
-

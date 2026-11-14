@@ -36,10 +36,7 @@ class AndroidBackgroundSyncController implements BackgroundSyncController {
 
     try {
       // Initialize WorkManager
-      await Workmanager().initialize(
-        callbackDispatcher,
-        isInDebugMode: false,
-      );
+      await Workmanager().initialize(callbackDispatcher);
 
       // Cancel any existing work
       await unregister();
@@ -48,7 +45,7 @@ class AndroidBackgroundSyncController implements BackgroundSyncController {
       final constraints = Constraints(
         networkType: _config.requiresNetwork
             ? NetworkType.connected
-            : NetworkType.not_required,
+            : NetworkType.notRequired,
         requiresCharging: _config.requiresCharging,
         requiresBatteryNotLow: !_config.allowLowBattery,
       );
@@ -117,17 +114,16 @@ void callbackDispatcher() {
         // Since we can't pass closures across isolates, the app must
         // provide these factories via a mechanism that works in background isolate
         // (e.g., service locator, dependency injection, or static factories)
-        
+
         // For now, this is a placeholder that returns success
         // The actual sync execution should be implemented by the app
         // using BackgroundSyncService.executeBackgroundSync()
-        return Future.value(true);
+        return true;
       } catch (e) {
         // Fail silently - background sync is best-effort
-        return Future.value(false);
+        return false;
       }
     }
-    return Future.value(false);
+    return false;
   });
 }
-
